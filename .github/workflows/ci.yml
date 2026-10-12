@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: rust · fmt, clippy, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install HDF5
+        run: sudo apt-get update && sudo apt-get install -y libhdf5-dev
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --locked --features python --all-targets -- -D warnings
+      - name: Docs
+        run: cargo doc --locked --no-deps --features python
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: Tests
+        # Tests that need real game assets are #[ignore]d: those files are not
+        # distributable.
+        run: cargo test --locked
+
+  python:
+    name: python · wheel, types, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install HDF5
+        run: sudo apt-get update && sudo apt-get install -y libhdf5-dev
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          args: --release --out dist
+          sccache: "true"
+          # Built on the runner against the system libhdf5; release wheels link
+          # HDF5 statically instead.
+          manylinux: "off"
+      - name: Install wheel and test tools
+        run: python -m pip install dist/*.whl pytest mypy ruff
+      - name: Lint
+        run: |
+          ruff check python tests/python
+          ruff format --check python tests/python
+      - name: Type check
+        run: |
+          mypy --strict python/fs_assets
+          python -m mypy.stubtest fs_assets._fs_assets
+      - name: Tests
+        run: pytest tests/python

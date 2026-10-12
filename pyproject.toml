@@ -1,0 +1,63 @@
+[build-system]
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "fs-assets"
+dynamic = ["version"]
+description = "Foxhole game asset tools: pak extraction, item catalog and icon-template database"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Jorge García" }]
+keywords = ["foxhole", "pak", "uasset", "catalog", "game"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Rust",
+    "Topic :: Games/Entertainment",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/xurxogr/fs-assets"
+Repository = "https://github.com/xurxogr/fs-assets"
+Issues = "https://github.com/xurxogr/fs-assets/issues"
+
+[project.scripts]
+fs-assets = "fs_assets:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.4",
+    "mypy>=1.10",
+    "pre-commit>=3.0",
+]
+
+[tool.maturin]
+features = ["python"]
+python-source = "python"
+module-name = "fs_assets._fs_assets"
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["python/fs_assets"]

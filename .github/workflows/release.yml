@@ -1,0 +1,179 @@
+name: Release
+
+# Publishes the `fs-assets` wheels and sdist to PyPI and attaches standalone
+# `fs-assets` binaries to the GitHub release.
+#
+# HDF5 is built from source and statically linked (feature `static-hdf5`), so
+# neither the wheels nor the binaries need a system libhdf5.
+#
+# Triggers: tag push `v*` (build + publish) and manual dispatch or changes to
+# this workflow in a pull request (build only).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths: [".github/workflows/release.yml"]
+
+permissions:
+  contents: read
+
+env:
+  CLI_BIN: fs-assets
+
+jobs:
+  build-wheels:
+    name: wheels · ${{ matrix.platform.os }}-${{ matrix.platform.target }}
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { runner: ubuntu-latest,  target: x86_64,  os: linux }
+          - { runner: windows-latest, target: x64,     os: windows }
+          # macOS is aarch64-only: HDF5's CMake build runs try_run() probes,
+          # which can't execute x86_64 binaries when cross-building on arm64.
+          - { runner: macos-14,       target: aarch64, os: macos }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          # Passing --features replaces pyproject's [tool.maturin] features, so
+          # `python` must be repeated here.
+          args: --release --out dist --features python,static-hdf5
+          sccache: "true"
+          # manylinux_2_28 has a toolchain able to build HDF5 from source;
+          # before-script-linux runs inside that container.
+          manylinux: "2_28"
+          before-script-linux: dnf install -y cmake gcc gcc-c++ make
+      - name: Smoke test wheel
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --find-links dist --no-index fs-assets
+          python -c "import fs_assets; print('fs_assets', fs_assets.__version__)"
+          fs-assets --version
+      - uses: actions/upload-artifact@v5
+        with:
+          name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}
+          path: dist/*.whl
+
+  build-sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v5
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  # Standalone CLI: no `python` feature, so the binary needs no Python.
+  build-cli:
+    name: cli · ${{ matrix.platform.os }}-${{ matrix.platform.arch }}
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { runner: ubuntu-latest,  arch: x86_64,  os: linux,   target: x86_64-unknown-linux-gnu }
+          - { runner: windows-latest, arch: x86_64,  os: windows, target: x86_64-pc-windows-msvc }
+          - { runner: macos-14,       arch: aarch64, os: macos,   target: aarch64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-${{ matrix.platform.target }}
+      - name: Build CLI (static HDF5)
+        shell: bash
+        run: |
+          cargo build --release --locked --features static-hdf5 \
+            --bin "$CLI_BIN" --target ${{ matrix.platform.target }}
+      - name: Package
+        id: pkg
+        shell: bash
+        run: |
+          name="fs-assets-${{ matrix.platform.os }}-${{ matrix.platform.arch }}"
+          src="target/${{ matrix.platform.target }}/release/$CLI_BIN"
+          if [ "${{ matrix.platform.os }}" = "windows" ]; then
+            7z a "$name.zip" "$src.exe"
+            echo "asset=$name.zip" >> "$GITHUB_OUTPUT"
+          else
+            tar -C "target/${{ matrix.platform.target }}/release" -czf "$name.tar.gz" "$CLI_BIN"
+            echo "asset=$name.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/upload-artifact@v5
+        with:
+          name: cli-${{ matrix.platform.os }}-${{ matrix.platform.arch }}
+          path: ${{ steps.pkg.outputs.asset }}
+
+  # The published version comes from Cargo.toml; the tag only triggers the
+  # release. Fail when they disagree.
+  check-version:
+    name: check · tag matches Cargo.toml
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Compare tag to Cargo.toml version
+        shell: bash
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          cargo_version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')"
+          echo "tag: $tag_version  Cargo.toml: $cargo_version"
+          if [ "$tag_version" != "$cargo_version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $cargo_version." >&2
+            exit 1
+          fi
+
+  # Trusted publishing (OIDC): the PyPI project `fs-assets` must list this
+  # repository and workflow as a trusted publisher for the `pypi` environment.
+  publish:
+    name: publish · PyPI
+    needs: [check-version, build-wheels, build-sdist]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/fs-assets
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: "{wheels-*,sdist}"
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: release · GitHub
+    needs: [publish, build-cli]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: "cli-*"
+          path: cli
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: cli/*

@@ -1,0 +1,91 @@
+[package]
+name = "fs-assets"
+version = "0.1.0"
+edition = "2021"
+description = "Foxhole game asset tools: pak extraction, item catalog and icon-template database"
+license = "MIT"
+authors = ["Jorge García"]
+repository = "https://github.com/xurxogr/fs-assets"
+readme = "README.md"
+keywords = ["foxhole", "pak", "uasset", "catalog", "game"]
+# What goes into the source package (and the PyPI sdist): never local data.
+include = [
+    "/src/**/*.rs",
+    "/python/**/*.py",
+    "/python/**/*.pyi",
+    "/python/**/py.typed",
+    "/tests/python/*.py",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/pyproject.toml",
+    "/README.md",
+    "/LICENSE",
+]
+
+[[bin]]
+name = "fs-assets"
+path = "src/main.rs"
+
+[lib]
+name = "fs_assets"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+anyhow = "1"
+unreal_asset = "0.1.16"
+# Only PNG is needed: cooked Foxhole UI textures embed a ready-made PNG blob
+# in the export tail (see src/convert/mod.rs::uasset_to_png doc comment) that
+# we decode-then-re-encode for validation; no other codec is exercised.
+image = { version = "0.25", default-features = false, features = ["png"] }
+clap = { version = "4", features = ["derive"] }
+# crates.io's "repak" name is squatted by an unrelated placeholder crate
+# (a stub `add(left, right)` published 2025-02-16 with no relation to
+# trumank/repak); the real repak only exists in-repo as a workspace
+# member with no crates.io release, so it's pulled as a git dependency
+# pinned to a tagged release instead.
+repak = { git = "https://github.com/trumank/repak", tag = "v0.2.3" }
+# Recursive directory walk for `pack`'s "directory -> .pak" input traversal.
+walkdir = "2"
+# Pure-Rust BC1/BC3/BC5/BC7 (DXT1/DXT5/BC5/BC7) block decoder for real cooked
+# Texture2D mip chains (see uasset_to_png's compressed-mip-chain path).
+# unreal_asset has no FTexturePlatformData support, so the container itself
+# is hand-parsed from raw bytes; this crate only does the block-level pixel
+# math, which was deliberately not hand-rolled.
+texture2ddecoder = "0.1.2"
+hdf5 = "0.8"
+# Direct handle on hdf5-sys so the `static-hdf5` feature can build libhdf5 (and
+# its zlib filter) from source. Unifies with the hdf5 crate's own hdf5-sys dep.
+hdf5-sys = "0.8"
+# Only pulled in by `static-hdf5`. hdf5-src builds zlib with `-DZ_SOLO`, which
+# drops zlib's default allocator and breaks HDF5's deflate filter; depending on
+# libz-sys with its default features unifies it across the graph and restores
+# the allocator (aldanor/hdf5-rust#206).
+libz-sys = { version = "1.1", features = ["static"], optional = true }
+# Temporary workspace add-mod extracts a .pak into when given one directly.
+tempfile = "3"
+# Python bindings (optional), mirroring fs-sav/fs-ocr's `python` feature.
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"], optional = true }
+
+[features]
+default = []
+python = ["pyo3"]
+# Build and statically link HDF5 from source instead of using the system
+# libhdf5, so published wheels and binaries carry no external libhdf5. Local
+# builds keep the system library (faster). Needs CMake and a C compiler.
+static-hdf5 = ["hdf5-sys/static", "hdf5-sys/zlib", "dep:libz-sys"]
+
+# Two allocation-count sites in unreal_asset panic on garbage/misaligned
+# `Vec::with_capacity`/`IndexedMap::with_capacity` counts instead of
+# surfacing a recoverable `Error`, plus one map-value struct-type ambiguity
+# affecting large-ship blueprints (see the fork's commit f6872e7 for the
+# fix), which together make several large-ship blueprints unreadable.
+[patch.crates-io]
+unreal_asset = { git = "https://github.com/xurxogr/unrealmodding", rev = "439971cd6a87b9d0b0c58f7f88f96ebf2dec5189" }
+
+
+[profile.release]
+lto = true
+strip = true
