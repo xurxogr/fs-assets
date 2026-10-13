@@ -167,7 +167,7 @@ pub fn resize_lanczos_rgba(image: &RgbaImage, width: u32, height: u32) -> RgbaIm
         buffer = resample_vertical(&buffer, current_w, in_h, out_h);
     }
 
-    for px in buffer.chunks_exact_mut(4) {
+    for px in buffer.as_chunks_mut::<4>().0 {
         let alpha = px[3] as u32;
         if alpha != 0 && alpha != 255 {
             for channel in &mut px[..3] {
@@ -256,8 +256,10 @@ mod tests {
     fn flatten_matches_pillow_paste_on_black() {
         let bgr = flatten_on_black_to_bgr(&resize_lanczos_rgba(&pattern(), 5, 4));
         let expected: Vec<u8> = PILLOW_FLATTENED_5X4_RGB
-            .chunks_exact(3)
-            .flat_map(|px| [px[2], px[1], px[0]])
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|&[r, g, b]| [b, g, r])
             .collect();
         assert_eq!(bgr, expected);
     }

@@ -92,9 +92,10 @@ jobs:
           - { runner: macos-14,       arch: aarch64, os: macos,   target: aarch64-apple-darwin }
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform.target }}
+      # Every target is the runner's native one; the version is pinned in
+      # rust-toolchain.toml.
+      - name: Install Rust
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
           key: cli-${{ matrix.platform.target }}

@@ -912,8 +912,8 @@ fn decode_compressed_mip0(path: &Path) -> anyhow::Result<Vec<u8>> {
         // dump (no texture2ddecoder involved), confirmed byte-exact against
         // a ground-truth reference decode of MediumTank2CIcon.uasset and 3
         // sibling vehicle icons.
-        for px in payload.chunks_exact(4) {
-            rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+        for &[b, g, r, a] in payload.as_chunks::<4>().0 {
+            rgba.extend_from_slice(&[r, g, b, a]);
         }
     } else {
         let mut pixels = vec![0u32; width * height];

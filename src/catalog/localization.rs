@@ -106,8 +106,10 @@ fn read_fstring<R: Read>(r: &mut R) -> io::Result<Option<String>> {
             return Ok(None);
         }
         let units: Vec<u16> = data
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&pair| u16::from_le_bytes(pair))
             .collect();
         let s = String::from_utf16_lossy(&units);
         Ok(Some(s.trim_end_matches('\0').to_string()))

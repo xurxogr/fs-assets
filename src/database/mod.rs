@@ -387,10 +387,12 @@ const GRAY_R: u32 = 4899;
 /// `cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)` for 8-bit BGR, bit-exact.
 fn bgr_to_grayscale(image: &[u8], width: usize, height: usize) -> Vec<u8> {
     image
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .take(width * height)
-        .map(|px| {
-            let weighted = px[0] as u32 * GRAY_B + px[1] as u32 * GRAY_G + px[2] as u32 * GRAY_R;
+        .map(|&[b, g, r]| {
+            let weighted = b as u32 * GRAY_B + g as u32 * GRAY_G + r as u32 * GRAY_R;
             ((weighted + (1 << (GRAY_SHIFT - 1))) >> GRAY_SHIFT) as u8
         })
         .collect()
