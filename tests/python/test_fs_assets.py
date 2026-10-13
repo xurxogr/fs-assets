@@ -5,6 +5,8 @@ tests that need real game assets are skipped when `tests/fixtures` isn't
 present locally, since those fixtures aren't checked into the repo.
 """
 
+import importlib
+import importlib.metadata
 import json
 import struct
 import zlib
@@ -23,6 +25,19 @@ requires_fixtures = pytest.mark.skipif(
 def test_version_returns_string():
     assert isinstance(fs_assets.version(), str)
     assert fs_assets.version()
+
+
+def test_package_version_needs_no_installed_metadata(monkeypatch):
+    """Frozen apps (e.g. PyInstaller) ship no package metadata; import must still work."""
+
+    def missing(name):
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", missing)
+
+    reloaded = importlib.reload(fs_assets)
+
+    assert reloaded.__version__ == reloaded.version()
 
 
 def test_unpak_nonexistent_pak_raises():

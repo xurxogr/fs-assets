@@ -1,6 +1,6 @@
 [package]
 name = "fs-assets"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Foxhole game asset tools: pak extraction, item catalog and icon-template database"
 license = "MIT"

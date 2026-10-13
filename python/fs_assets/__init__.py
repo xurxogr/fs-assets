@@ -15,7 +15,6 @@ Example:
 """
 
 import sys
-from importlib.metadata import version as _pkg_version
 
 from ._fs_assets import (
     add_mod,
@@ -54,7 +53,9 @@ __all__ = [
     "version",
 ]
 
-__version__ = _pkg_version("fs-assets")
+# Taken from the native module (the crate version) rather than the installed
+# package metadata, which frozen apps such as PyInstaller bundles do not ship.
+__version__ = version()
 
 
 def main() -> None:
