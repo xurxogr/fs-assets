@@ -11,7 +11,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 
-use crate::add_mod::{AddModRequest, AssetSource, Progress};
+use crate::add_mod::{AddModRequest, AssetSource, ExtractIconsRequest, Progress};
 use crate::database::{ItemCategory, ItemFaction};
 use crate::{catalog, convert, database, grep, locres};
 
@@ -484,6 +484,70 @@ fn grep_strings(py: Python<'_>, pattern: &str, content_dir: &str) -> PyResult<Py
     json_to_py(py, &serde_json::Value::Array(matches_json))
 }
 
+/// Write the icon of every catalog item a source provides as
+/// `<CodeName>.png`, with the item's subtype icon drawn over its top-left
+/// corner as in game unless `subicons` is false.
+///
+/// Args:
+///     extract_dir: Directory a pak was already extracted into. Mutually
+///         exclusive with `pak`; one of the two is required.
+///     catalog: Existing catalog JSON listing the items whose icons are
+///         extracted.
+///     output: Directory the PNGs are written into.
+///     pak: A `.pak` path, or a list of them in override order (later ones
+///         win), read directly.
+///     subicons: Whether to draw each item's subtype icon over its icon.
+///     vanilla_extract_dir: Extraction directory of the base game's own pak,
+///         used for the subtype icons the source doesn't itself provide.
+///     vanilla_pak: The base game's `.pak`, read directly, as the same
+///         fallback as `vanilla_extract_dir`.
+///
+/// Returns:
+///     Dict with `written`, `icons_missing`, `decode_errors` and
+///     `subicons_missing` (icons written without the subtype icon they have,
+///     because it was missing or failed to decode).
+#[pyfunction]
+#[pyo3(signature = (
+    extract_dir=None, *, catalog, output, pak=None, subicons=true,
+    vanilla_extract_dir=None, vanilla_pak=None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn extract_icons(
+    py: Python<'_>,
+    extract_dir: Option<&str>,
+    catalog: &str,
+    output: &str,
+    pak: Option<PakPaths>,
+    subicons: bool,
+    vanilla_extract_dir: Option<&str>,
+    vanilla_pak: Option<&str>,
+) -> PyResult<Py<PyAny>> {
+    let paks = pak.map(PakPaths::into_paths).unwrap_or_default();
+    let source = asset_source("extract_dir", extract_dir, "pak", paks)?
+        .ok_or_else(|| PyErr::new::<PyValueError, _>("one of extract_dir or pak is required"))?;
+    let request = ExtractIconsRequest {
+        source,
+        vanilla: asset_source(
+            "vanilla_extract_dir",
+            vanilla_extract_dir,
+            "vanilla_pak",
+            vanilla_pak.map(PathBuf::from).into_iter().collect(),
+        )?,
+        catalog: PathBuf::from(catalog),
+        output: PathBuf::from(output),
+        subicons,
+    };
+    let stats = py
+        .allow_threads(|| crate::add_mod::extract_icons(&request))
+        .map_err(to_py_err)?;
+    let result = PyDict::new(py);
+    result.set_item("written", stats.written)?;
+    result.set_item("icons_missing", stats.icons_missing)?;
+    result.set_item("decode_errors", stats.decode_errors)?;
+    result.set_item("subicons_missing", stats.subicons_missing)?;
+    Ok(result.into_any().unbind())
+}
+
 /// Report how many of a catalog's icons some paks contain, reading only the
 /// pak indexes (nothing is extracted).
 ///
@@ -609,6 +673,7 @@ fn _fs_assets(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_catalog, m)?)?;
     m.add_function(wrap_pyfunction!(add_mod, m)?)?;
     m.add_function(wrap_pyfunction!(modify_icon, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_icons, m)?)?;
     m.add_function(wrap_pyfunction!(pak_coverage, m)?)?;
     m.add_function(wrap_pyfunction!(read_templates, m)?)?;
     m.add_function(wrap_pyfunction!(database_statistics, m)?)?;

@@ -44,6 +44,10 @@ fs-assets check-paks --catalog catalog.json --pak IconMod.pak
 fs-assets add-mod --pak IconMod.pak --vanilla-pak War-WindowsNoEditor.pak \
     --catalog catalog.json --db templates.h5 --mod-name icon-mod
 
+# Every catalog icon as <CodeName>.png, with or without the subtype icons
+fs-assets extract-icons --pak War-WindowsNoEditor.pak --catalog catalog.json -o icons
+fs-assets extract-icons --pak War-WindowsNoEditor.pak --catalog catalog.json -o icons --no-subicons
+
 # Replace one icon at two resolutions from a PNG
 fs-assets modify-icon --db templates.h5 --code RifleW --faction wardens \
     --category item --icon rifle.png --resolution 1080,1440 --replace
@@ -56,6 +60,7 @@ fs-assets modify-icon --db templates.h5 --code RifleW --faction wardens \
 | `build-catalog` | Build the catalog from the game pak or an extracted directory. `--full` keeps audio, visual and engine-internal fields. |
 | `add-mod` | Add a mod's (or the base game's) icons to the template database. Re-adding a mod replaces its templates. `--pak` can be repeated (later paks win); `--resolution` rebuilds only some resolutions. |
 | `check-paks` | Report how many of the catalog's icons and overlays some paks contain, reading only the pak indexes. |
+| `extract-icons` | Write every catalog item's icon as `<CodeName>.png`, with its subtype icon drawn over it as in game; `--no-subicons` writes the bare icons. `--vanilla-pak` supplies the subtype icons a mod lacks. |
 | `modify-icon` | Add, replace (`--replace`) or remove (`--remove`) a single template from a PNG or `.uasset`. |
 | `locres-dump` / `locres-pack` | Convert a `.locres` to editable JSON and back. |
 | `pack` | Pack a directory into a mod `.pak`. |

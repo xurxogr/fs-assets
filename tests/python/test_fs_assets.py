@@ -316,3 +316,19 @@ def test_add_mod(tmp_path):
     stats = fs_assets.add_mod(str(FIXTURES_DIR), catalog=str(catalog), db=str(db))
     assert db.exists()
     assert "items_embedded" in stats
+
+
+def test_extract_icons_counts_undecodable_icons(tmp_path):
+    stats = fs_assets.extract_icons(
+        pak=str(_icon_mod_pak(tmp_path)),
+        catalog=str(_catalog(tmp_path)),
+        output=str(tmp_path / "icons"),
+        subicons=False,
+    )
+
+    assert stats == {
+        "written": 0,
+        "icons_missing": 0,
+        "decode_errors": 1,
+        "subicons_missing": 0,
+    }

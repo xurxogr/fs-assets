@@ -11,11 +11,13 @@
 //! (see [`referenced_icon_paths`]).
 
 mod coverage;
+mod extract_icons;
 mod progress;
 #[cfg(test)]
 mod test_paks;
 
 pub use coverage::{pak_coverage, PakCoverage};
+pub use extract_icons::{extract_icons, ExtractIconsRequest, ExtractIconsStats};
 pub use progress::{Progress, Stage};
 
 use std::collections::HashSet;

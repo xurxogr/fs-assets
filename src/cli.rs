@@ -109,6 +109,37 @@ enum Commands {
         #[arg(long, required = true)]
         pak: Vec<PathBuf>,
     },
+    /// Write the icon of every item in `--catalog` that some paks (or an
+    /// extracted directory) provide as `<CodeName>.png`, with the item's
+    /// subtype icon drawn over its top-left corner as in game, unless
+    /// `--no-subicons` is given.
+    ExtractIcons {
+        /// Directory a pak was already extracted into.
+        #[arg(long, required_unless_present = "pak", conflicts_with = "pak")]
+        extract_dir: Option<PathBuf>,
+        /// The `.pak` to read the icons from. Repeat it for a mod split
+        /// across several paks; a file several of them contain is taken from
+        /// the last one.
+        #[arg(long)]
+        pak: Vec<PathBuf>,
+        /// Existing catalog listing the items whose icons are extracted.
+        #[arg(long)]
+        catalog: PathBuf,
+        /// Directory the PNGs are written into.
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Write the bare icons, without the subtype icons drawn over them.
+        #[arg(long)]
+        no_subicons: bool,
+        /// Extraction directory of the base game's own pak, used for the
+        /// subtype icons the source doesn't itself provide.
+        #[arg(long, conflicts_with_all = ["vanilla_pak", "no_subicons"])]
+        vanilla_extract_dir: Option<PathBuf>,
+        /// The base game's `.pak`, read directly, as the same subtype-icon
+        /// fallback as `--vanilla-extract-dir`.
+        #[arg(long, conflicts_with = "no_subicons")]
+        vanilla_pak: Option<PathBuf>,
+    },
     /// Add, replace, or remove a single icon's template in an existing (or
     /// brand-new) database, independent of any catalog/pak — for one-off
     /// fixes without re-running the full add-mod pipeline. `--replace`
@@ -370,6 +401,30 @@ where
                 coverage.has_crate_icon
             );
         }
+        Commands::ExtractIcons {
+            extract_dir,
+            pak,
+            catalog,
+            output,
+            no_subicons,
+            vanilla_extract_dir,
+            vanilla_pak,
+        } => {
+            let source = asset_source(extract_dir, pak)
+                .ok_or_else(|| anyhow::anyhow!("either --extract-dir or --pak is required"))?;
+            let request = add_mod::ExtractIconsRequest {
+                source,
+                vanilla: asset_source(vanilla_extract_dir, vanilla_pak.into_iter().collect()),
+                catalog,
+                output,
+                subicons: !no_subicons,
+            };
+            let stats = add_mod::extract_icons(&request)?;
+            println!(
+                "written {} icons_missing {} decode_errors {} subicons_missing {}",
+                stats.written, stats.icons_missing, stats.decode_errors, stats.subicons_missing
+            );
+        }
         Commands::ModifyIcon {
             db,
             code,
@@ -590,6 +645,30 @@ mod tests {
     fn add_mod_requires_an_existing_catalog_and_never_rewrites_it() {
         assert!(parse(&["add-mod", "--pak", "a.pak"]).is_err());
         assert!(parse(&["add-mod", "--pak", "a.pak", "--catalog", "c.json", "--full"]).is_err());
+    }
+
+    #[test]
+    fn extract_icons_draws_subicons_unless_told_not_to() {
+        let args = [
+            "extract-icons",
+            "--pak",
+            "War.pak",
+            "--catalog",
+            "catalog.json",
+            "-o",
+            "icons",
+        ];
+        let Commands::ExtractIcons { no_subicons, .. } = parse(&args).unwrap().command else {
+            panic!("expected extract-icons");
+        };
+        assert!(!no_subicons);
+
+        let with_flag = [args.as_slice(), &["--no-subicons"]].concat();
+        let Commands::ExtractIcons { no_subicons, .. } = parse(&with_flag).unwrap().command else {
+            panic!("expected extract-icons");
+        };
+        assert!(no_subicons);
+        assert!(parse(&[with_flag.as_slice(), &["--vanilla-pak", "v.pak"]].concat()).is_err());
     }
 
     #[test]

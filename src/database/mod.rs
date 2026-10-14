@@ -348,6 +348,43 @@ fn blend_overlay_bgr(base: &mut [u8], size: u32, overlay: &DynamicImage, top_lef
     }
 }
 
+/// `image` at its own size with `subicon` drawn over its top-left corner the
+/// way the templates get it (tinted, `SUBICON_ASPECT_RATIO` of the icon's
+/// shorter side, alpha weighted by `SUBICON_ALPHA`), but alpha-composited
+/// onto the icon instead of a black background, so the icon's transparency
+/// is kept. A blank placeholder subicon (see [`is_blank_subicon`]) is not
+/// drawn.
+pub fn composite_subicon(image: &DynamicImage, subicon: &DynamicImage) -> RgbaImage {
+    let mut base = image.to_rgba8();
+    let overlay_size = (base.width().min(base.height()) as f64 * SUBICON_ASPECT_RATIO) as u32;
+    if overlay_size == 0 || is_blank_subicon(subicon) {
+        return base;
+    }
+    let resized = resize_lanczos_rgba(
+        &tint_overlay(&subicon.to_rgba8()),
+        overlay_size,
+        overlay_size,
+    );
+
+    for (x, y, px) in resized.enumerate_pixels() {
+        let overlay_alpha = px[3] as f32 / 255.0 * SUBICON_ALPHA;
+        let dest = base.get_pixel_mut(x, y);
+        let base_alpha = dest[3] as f32 / 255.0;
+        let out_alpha = overlay_alpha + base_alpha * (1.0 - overlay_alpha);
+        if out_alpha <= 0.0 {
+            continue;
+        }
+        for c in 0..3 {
+            let value = (overlay_alpha * px[c] as f32
+                + base_alpha * (1.0 - overlay_alpha) * dest[c] as f32)
+                / out_alpha;
+            dest[c] = value.round().clamp(0.0, 255.0) as u8;
+        }
+        dest[3] = (out_alpha * 255.0).round() as u8;
+    }
+    base
+}
+
 /// Size of the pHash grid (8x8 = 64 bits). Copied from `fs-ocr`'s
 /// `phash.rs::HASH_SIZE`.
 const HASH_SIZE: usize = 8;
@@ -1092,6 +1129,45 @@ mod tests {
         fn empty_subicon_is_blank() {
             let image = DynamicImage::ImageRgba8(RgbaImage::new(0, 0));
             assert!(is_blank_subicon(&image));
+        }
+    }
+
+    mod composite_subicon_tests {
+        use super::*;
+        use image::{Rgba, RgbaImage};
+
+        fn icon(color: [u8; 4]) -> DynamicImage {
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(32, 32, Rgba(color)))
+        }
+
+        #[test]
+        fn draws_the_subicon_only_over_the_top_left_corner() {
+            let base = icon([0, 0, 0, 255]);
+            let composited = composite_subicon(&base, &icon([255, 255, 255, 255]));
+
+            // 32 * 7/16 = 14px overlay.
+            assert_eq!(composited.dimensions(), (32, 32));
+            assert_ne!(composited.get_pixel(0, 0), &Rgba([0, 0, 0, 255]));
+            assert_eq!(composited.get_pixel(0, 0)[3], 255);
+            assert_eq!(composited.get_pixel(14, 14), &Rgba([0, 0, 0, 255]));
+            assert_eq!(composited.get_pixel(31, 0), &Rgba([0, 0, 0, 255]));
+        }
+
+        #[test]
+        fn keeps_the_icon_transparent_outside_the_subicon() {
+            let composited = composite_subicon(&icon([0, 0, 0, 0]), &icon([255, 255, 255, 255]));
+
+            // The subicon is drawn at 75% opacity over a transparent icon.
+            assert_eq!(composited.get_pixel(0, 0)[3], 191);
+            assert_eq!(composited.get_pixel(20, 20), &Rgba([0, 0, 0, 0]));
+        }
+
+        #[test]
+        fn blank_subicon_leaves_the_icon_untouched() {
+            let base = icon([10, 20, 30, 255]);
+            let composited = composite_subicon(&base, &icon([90, 90, 90, 255]));
+
+            assert_eq!(composited, base.to_rgba8());
         }
     }
 }

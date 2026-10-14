@@ -8,6 +8,7 @@ from fs_assets.types import (
     Category,
     DatabaseBuildStats,
     DatabaseStatistics,
+    ExtractIconsStats,
     Faction,
     LocresDumpStats,
     PakCoverage,
@@ -24,6 +25,7 @@ __all__ = [
     "build_catalog",
     "add_mod",
     "modify_icon",
+    "extract_icons",
     "pak_coverage",
     "read_templates",
     "database_statistics",
@@ -71,6 +73,16 @@ def modify_icon(
     replace: bool = False,
     remove: bool = False,
 ) -> None: ...
+def extract_icons(
+    extract_dir: str | None = None,
+    *,
+    catalog: str,
+    output: str,
+    pak: str | Sequence[str] | None = None,
+    subicons: bool = True,
+    vanilla_extract_dir: str | None = None,
+    vanilla_pak: str | None = None,
+) -> ExtractIconsStats: ...
 def pak_coverage(*, catalog: str, pak: str | Sequence[str]) -> PakCoverage: ...
 def read_templates(db: str, resolution: int) -> list[Template]: ...
 def database_statistics(db: str) -> DatabaseStatistics: ...

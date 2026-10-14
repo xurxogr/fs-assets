@@ -115,7 +115,7 @@ pub fn overlay_icon_paths(catalog: &[Value]) -> HashSet<String> {
 /// Decodes one icon file to an in-memory image: a `.png` is read as is, a
 /// `.uasset` texture is converted first (catching a panicking decoder).
 /// Any other extension is rejected.
-fn decode_icon(path: &Path) -> anyhow::Result<image::DynamicImage> {
+pub fn decode_icon(path: &Path) -> anyhow::Result<image::DynamicImage> {
     let extension = path
         .extension()
         .and_then(|ext| ext.to_str())

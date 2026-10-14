@@ -25,6 +25,13 @@ class DatabaseBuildStats(TypedDict):
     decode_errors: int
 
 
+class ExtractIconsStats(TypedDict):
+    written: int
+    icons_missing: int
+    decode_errors: int
+    subicons_missing: int
+
+
 class PakCoverage(TypedDict):
     main_icons_found: int
     main_icons_total: int
