@@ -268,10 +268,11 @@ impl LocalizationLookup {
         }
     }
 
-    /// Load all locres files for a language, from cache if already loaded.
-    fn load_language(&self, language: &str) -> HashMap<String, String> {
-        if let Some(cached) = self.cache.borrow().get(language) {
-            return cached.clone();
+    /// Load all locres files for a language into the cache, unless it is
+    /// already there.
+    fn ensure_loaded(&self, language: &str) {
+        if self.cache.borrow().contains_key(language) {
+            return;
         }
 
         let mut strings: HashMap<String, String> = HashMap::new();
@@ -279,8 +280,8 @@ impl LocalizationLookup {
         if !self.localization_dir.exists() {
             self.cache
                 .borrow_mut()
-                .insert(language.to_string(), strings.clone());
-            return strings;
+                .insert(language.to_string(), strings);
+            return;
         }
 
         if let Ok(entries) = fs::read_dir(&self.localization_dir) {
@@ -318,24 +319,26 @@ impl LocalizationLookup {
 
         self.cache
             .borrow_mut()
-            .insert(language.to_string(), strings.clone());
-        strings
+            .insert(language.to_string(), strings);
     }
 
     /// Get the localized string for a GUID. `language` defaults to
     /// `self.default_language` when `None`.
+    ///
+    /// Only the one string is copied out: a language's table holds every
+    /// string of the game and is read once per GUID and language.
     pub fn get(&self, guid: &str, language: Option<&str>) -> Option<String> {
-        let language = language.unwrap_or(&self.default_language).to_string();
-        let strings = self.load_language(&language);
-        strings.get(guid).cloned()
+        let language = language.unwrap_or(&self.default_language);
+        self.ensure_loaded(language);
+        self.cache.borrow().get(language)?.get(guid).cloned()
     }
 
     /// Get a localized string with fallback to English, then to the raw GUID
     /// itself — never fails.
     pub fn get_with_fallback(&self, guid: &str, language: Option<&str>) -> String {
-        let language = language.unwrap_or(&self.default_language).to_string();
+        let language = language.unwrap_or(&self.default_language);
 
-        if let Some(result) = self.get(guid, Some(&language)) {
+        if let Some(result) = self.get(guid, Some(language)) {
             if !result.is_empty() {
                 return result;
             }
