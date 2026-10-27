@@ -4,7 +4,7 @@
 //! multi-language text lookup.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -37,7 +37,6 @@ pub struct LocalizationLookup {
     default_language: String,
     // {language: {guid: text}}
     cache: RefCell<HashMap<String, HashMap<String, String>>>,
-    loaded_files: RefCell<HashSet<String>>,
 }
 
 fn resolve_dir(path: &Path) -> PathBuf {
@@ -264,7 +263,6 @@ impl LocalizationLookup {
             localization_dir: resolve_dir(localization_dir),
             default_language: default_language.unwrap_or("en").to_string(),
             cache: RefCell::new(HashMap::new()),
-            loaded_files: RefCell::new(HashSet::new()),
         }
     }
 
@@ -305,14 +303,7 @@ impl LocalizationLookup {
                         continue;
                     }
 
-                    let file_key = format!("{}:{}", language, path.display());
-                    if self.loaded_files.borrow().contains(&file_key) {
-                        continue;
-                    }
-
-                    let parsed = parse_locres(&path);
-                    strings.extend(parsed);
-                    self.loaded_files.borrow_mut().insert(file_key);
+                    strings.extend(parse_locres(&path));
                 }
             }
         }
@@ -725,23 +716,6 @@ mod tests {
 
             let lookup = LocalizationLookup::new(tmp.path(), None);
             assert_eq!(lookup.get("GUID", Some("en")), Some("Hello".to_string()));
-        }
-
-        #[test]
-        fn skips_already_loaded_files() {
-            let tmp = tempfile::tempdir().unwrap();
-            let en_path = tmp.path().join("Foxhole-Content/en/test.locres");
-            create_mock_locres(&en_path, &[("GUID", "Hello")]);
-
-            let lookup = LocalizationLookup::new(tmp.path(), None);
-
-            assert_eq!(lookup.get("GUID", Some("en")), Some("Hello".to_string()));
-
-            lookup.cache.borrow_mut().clear();
-
-            // File won't be reloaded since it's tracked in loaded_files, so
-            // the freshly-cleared cache stays empty for this GUID.
-            assert_eq!(lookup.get("GUID", Some("en")), None);
         }
 
         #[test]
