@@ -1,33 +1,24 @@
-//! Filesystem-backed `add-mod` pipeline: resolves catalog icon paths to real
-//! `.uasset` files under an extraction directory, decodes them via
-//! `crate::convert::uasset_to_image` (the decode behind `uasset_to_png`,
-//! already verified pixel-exact against the full real icon corpus — see that
-//! module's docs), then resizes/hashes/writes the result to HDF5 via
-//! `crate::database::hdf5_writer`.
+//! The database side of `add-mod`: resolves catalog icon paths to real
+//! files (`.uasset` textures or `.png`s) under an extraction directory,
+//! decodes them ([`decode_icon`]), then resizes, hashes and writes the
+//! templates to HDF5 via `crate::database::hdf5_writer`.
 //!
 //! There is deliberately no separate "build a database from scratch" entry
 //! point: creating the very first mod's database and merging in the Nth
 //! mod's are the same operation — [`add_mod_to_database_with_progress`]
 //! reads whatever already exists at the output path (an empty per-resolution
 //! skeleton if nothing does yet) and merges this mod's templates into it,
-//! upserting by `code`. `crate::cli`'s `add-mod` command is the only caller.
+//! upserting by `(code, crated, mod_name)`. Its caller is
+//! `crate::add_mod::add_mod`, behind both the CLI's `add-mod` and the Python
+//! `add_mod`.
 //!
 //! Mirrors the split in `crate::catalog::pipeline`: the icon-path -> file
 //! resolution is injected as a closure (so
 //! [`build_database_from_catalog_with_progress`] is testable with an
 //! in-memory/fixture map, matching `blueprint_parser`'s loader-closure
-//! pattern) while the actual `.uasset` decode goes straight through
-//! `crate::convert` (consistent with how `catalog::pipeline` calls
+//! pattern) while the actual decode goes straight through `crate::convert`
+//! (consistent with how `catalog::pipeline` calls
 //! `convert::uasset_to_full_json` directly rather than injecting it).
-//!
-//! # Real end-to-end validation against `fs-ocr`
-//!
-//! Built a catalog + database from
-//! `~/code/foxhole-stockpiles/data/War-WindowsNoEditor` and confirmed
-//! `fs-ocr`'s own `TemplateDatabase::load` can open every resolution group
-//! it wrote (see the crate's top-level report for exact counts and the
-//! verification method used — a temporary `#[test]` added to, run in, and
-//! removed from `fs-ocr` afterward, not a permanent change to that crate).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -307,7 +298,7 @@ where
 /// mods (e.g. vanilla's rifle icon alongside a re-skin mod's rifle icon, both
 /// valid templates for OCR matching); only re-adding the *same* mod's own
 /// entry (e.g. re-extracting after a game patch) replaces it.
-pub fn merge_templates(
+fn merge_templates(
     mut existing: BTreeMap<i32, Vec<IconTemplate>>,
     new: BTreeMap<i32, Vec<IconTemplate>>,
 ) -> BTreeMap<i32, Vec<IconTemplate>> {
@@ -753,7 +744,7 @@ mod tests {
 
         #[test]
         #[ignore = "needs local game fixtures in tests/fixtures (not distributable)"]
-        fn duplicate_icon_path_across_items_is_decoded_once_but_both_embedded() {
+        fn items_sharing_an_icon_path_are_both_embedded() {
             let icon = fixture("BlueprintIcon.uasset");
             let mut files = StdHashMap::new();
             files.insert("War/Content/Icon".to_string(), icon);

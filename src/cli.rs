@@ -277,7 +277,7 @@ pub fn request_interrupt() -> bool {
     !INTERRUPTIBLE.load(Ordering::Relaxed) || INTERRUPTED.swap(true, Ordering::Relaxed)
 }
 
-/// The error a command stops with once [`INTERRUPTED`] is set.
+/// The error a command stops with once [`request_interrupt`] asked it to.
 #[derive(Debug)]
 pub struct Interrupted;
 

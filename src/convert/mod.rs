@@ -395,7 +395,7 @@ struct TextureHeader {
     pixel_format: CompressedPixelFormat,
     size_x: i32,
     size_y: i32,
-    /// Byte offset of mip[0]'s `FByteBulkData` header (its `BulkDataFlags`
+    /// Byte offset of `mip[0]`'s `FByteBulkData` header (its `BulkDataFlags`
     /// field). This is **not** immediately after `FirstMipToSerialize`+
     /// `Mips.Num()`: per `FTexture2DMipMap::Serialize` (confirmed against
     /// independent reference implementations of the engine's own
@@ -547,7 +547,7 @@ mod bulk_data_flags {
     pub const NO_OFFSET_FIX_UP: u32 = 1 << 16;
 }
 
-/// The `FByteBulkData` header preceding mip[0]'s pixel data. Field
+/// The `FByteBulkData` header preceding `mip[0]`'s pixel data. Field
 /// widths/order confirmed against two independent reference implementations
 /// of the engine's own bulk-data header serialization, both of which agree:
 /// `BulkDataFlags: u32`,
@@ -745,7 +745,7 @@ fn parse_bulk_data_start_offset(bytes: &[u8]) -> Option<i64> {
     r.i64()
 }
 
-/// Resolves mip[0]'s absolute payload location per `FByteBulkData::Serialize`
+/// Resolves `mip[0]`'s absolute payload location per `FByteBulkData::Serialize`
 /// (confirmed identical across independent reference implementations of the
 /// engine's own bulk-data serialization):
 ///
