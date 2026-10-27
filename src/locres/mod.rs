@@ -117,6 +117,17 @@ fn read_fstring<R: Read>(r: &mut R) -> io::Result<String> {
     }
 }
 
+/// `len` as the integer type a `.locres` stores it in, or an error naming
+/// `what` when it doesn't fit, rather than writing a wrapped, corrupt length.
+fn stored_len<T: TryFrom<usize>>(len: usize, what: &str) -> io::Result<T> {
+    T::try_from(len).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{what} ({len}) doesn't fit in a .locres"),
+        )
+    })
+}
+
 /// Write a UE4 `FString`, using the single-byte/ANSI path only for pure
 /// ASCII strings and UTF-16LE for everything else — matching how the base
 /// game's own non-English `.locres` files (e.g. German ü/ö/ä) are encoded.
@@ -128,12 +139,13 @@ fn write_fstring<W: Write>(w: &mut W, s: &str) -> io::Result<()> {
     if s.is_ascii() {
         let mut bytes: Vec<u8> = s.chars().map(|c| c as u8).collect();
         bytes.push(0);
-        w.write_all(&(bytes.len() as i32).to_le_bytes())?;
+        w.write_all(&stored_len::<i32>(bytes.len(), "string length")?.to_le_bytes())?;
         w.write_all(&bytes)
     } else {
         let mut units: Vec<u16> = s.encode_utf16().collect();
         units.push(0);
-        w.write_all(&(-(units.len() as i32)).to_le_bytes())?;
+        // Never overflows: a stored length is at most `i32::MAX`.
+        w.write_all(&(-stored_len::<i32>(units.len(), "string length")?).to_le_bytes())?;
         for u in &units {
             w.write_all(&u.to_le_bytes())?;
         }
@@ -271,11 +283,23 @@ pub fn parse(path: &Path) -> Result<LocresDocument> {
     for ns in pending {
         let mut entries = Vec::new();
         for e in ns.entries {
+            // An entry pointing outside the string array is a corrupt file;
+            // reading it as "" would only fail later, confusingly, when the
+            // dump is packed back ("empty text field").
             let text = usize::try_from(e.string_index)
                 .ok()
                 .and_then(|index| string_array.get(index))
                 .cloned()
-                .unwrap_or_default();
+                .with_context(|| {
+                    format!(
+                        "{}: {}/{} points at string {}, but there are only {}",
+                        path.display(),
+                        ns.namespace,
+                        e.key,
+                        e.string_index,
+                        string_array.len()
+                    )
+                })?;
             text_budget
                 .spend(&text)
                 .with_context(|| path.display().to_string())?;
@@ -322,7 +346,9 @@ pub fn write(doc: &LocresDocument, path: &Path) -> Result<()> {
     let entries_count_pos = buf.len();
     buf.extend_from_slice(&0u32.to_le_bytes()); // placeholder, backpatched below
 
-    buf.extend_from_slice(&(doc.namespaces.len() as u32).to_le_bytes());
+    buf.extend_from_slice(
+        &stored_len::<u32>(doc.namespaces.len(), "namespace count")?.to_le_bytes(),
+    );
 
     let mut total_entries: u32 = 0;
     let mut texts: Vec<&str> = Vec::new();
@@ -330,22 +356,24 @@ pub fn write(doc: &LocresDocument, path: &Path) -> Result<()> {
     for ns in &doc.namespaces {
         buf.extend_from_slice(&ns.namespace_hash.to_le_bytes());
         write_fstring(&mut buf, &ns.namespace)?;
-        buf.extend_from_slice(&(ns.entries.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&stored_len::<u32>(ns.entries.len(), "entry count")?.to_le_bytes());
 
         for entry in &ns.entries {
             buf.extend_from_slice(&entry.key_hash.to_le_bytes());
             write_fstring(&mut buf, &entry.key)?;
             buf.extend_from_slice(&entry.source_hash.to_le_bytes());
 
-            let string_index = texts.len() as i32;
+            let string_index = stored_len::<i32>(texts.len(), "string count")?;
             buf.extend_from_slice(&string_index.to_le_bytes());
             texts.push(&entry.text);
-            total_entries += 1;
+            total_entries = total_entries
+                .checked_add(1)
+                .context("entry count doesn't fit in a .locres")?;
         }
     }
 
-    let string_array_offset = buf.len() as i64;
-    buf.extend_from_slice(&(texts.len() as i32).to_le_bytes());
+    let string_array_offset = stored_len::<i64>(buf.len(), "string array offset")?;
+    buf.extend_from_slice(&stored_len::<i32>(texts.len(), "string count")?.to_le_bytes());
     for text in &texts {
         write_fstring(&mut buf, text)?;
         buf.extend_from_slice(&1u32.to_le_bytes()); // ref_count: advisory, always 1 (no dedup)
@@ -720,6 +748,33 @@ mod tests {
                 format!("{err:#}").contains("the file's size in text"),
                 "{err:#}"
             );
+        }
+
+        #[test]
+        fn rejects_an_entry_pointing_outside_the_string_array() {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("index.locres");
+            let mut bytes = shared_text_locres(1, 3);
+            // The one entry's string index sits just before the string array.
+            let offset_bytes: [u8; 8] = bytes[17..25].try_into().unwrap();
+            let string_array_offset = i64::from_le_bytes(offset_bytes) as usize;
+            bytes[string_array_offset - 4..string_array_offset]
+                .copy_from_slice(&5i32.to_le_bytes());
+            fs::write(&path, bytes).unwrap();
+
+            let err = parse(&path).unwrap_err();
+
+            assert!(
+                format!("{err:#}").contains("/k0 points at string 5, but there are only 1"),
+                "{err:#}"
+            );
+        }
+
+        #[test]
+        fn lengths_that_do_not_fit_are_errors_not_wrapped_values() {
+            assert_eq!(stored_len::<u8>(255, "x").unwrap(), 255);
+            let err = stored_len::<u8>(256, "string length").unwrap_err();
+            assert!(err.to_string().contains("string length (256)"), "{err}");
         }
 
         #[test]
