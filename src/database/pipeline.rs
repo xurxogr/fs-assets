@@ -273,17 +273,30 @@ where
             })
             .flatten();
 
-        for &resolution in target_resolutions {
-            let templates = database::build_icon_templates(
-                &item,
-                mod_name,
-                &image,
-                subicon.as_deref(),
-                crate_icon.as_deref(),
-                resolution,
-            );
+        // Each resolution resizes the icon from scratch, so they're built
+        // in parallel from the one prepared copy.
+        let prepared =
+            database::PreparedIcon::new(&image, subicon.as_deref(), crate_icon.as_deref());
+        let built: Vec<Vec<IconTemplate>> = std::thread::scope(|scope| {
+            let (prepared, item) = (&prepared, &item);
+            let handles: Vec<_> = target_resolutions
+                .iter()
+                .map(|&resolution| {
+                    scope.spawn(move || prepared.templates(item, mod_name, resolution))
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|e| std::panic::resume_unwind(e))
+                })
+                .collect()
+        });
+        for (resolution, templates) in target_resolutions.iter().zip(built) {
             resolutions
-                .get_mut(&resolution)
+                .get_mut(resolution)
                 .expect("all resolutions preallocated")
                 .extend(templates);
         }
