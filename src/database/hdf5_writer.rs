@@ -168,15 +168,16 @@ pub fn read_statistics(path: &Path) -> anyhow::Result<DatabaseStatistics> {
             continue;
         };
         stats.resolutions.push(resolution);
-        let count: i64 = group.attr("template_count")?.read_scalar()?;
-        if count <= 0 {
+        let n = template_count(&group, resolution)?;
+        if n == 0 {
             continue;
         }
-        let mods: Vec<VarLenUnicode> = group.dataset("mods")?.read_raw()?;
+        let mods: Vec<VarLenUnicode> =
+            sized_dataset(&group, resolution, "mods", &[n])?.read_raw()?;
         for mod_name in &mods {
             *stats
                 .per_mod
-                .entry(mod_name.to_string())
+                .entry(vlen_to_string(mod_name)?)
                 .or_default()
                 .entry(resolution)
                 .or_default() += 1;
@@ -185,50 +186,77 @@ pub fn read_statistics(path: &Path) -> anyhow::Result<DatabaseStatistics> {
     Ok(stats)
 }
 
-fn read_group(group: &hdf5::Group, resolution: i32) -> anyhow::Result<Vec<IconTemplate>> {
+/// Largest `template_count` accepted for one group: the base game has ~730
+/// templates per resolution, so this leaves room for dozens of mods while
+/// keeping a hostile count from sizing gigabytes of reads.
+const MAX_TEMPLATES_PER_GROUP: usize = 50_000;
+
+/// A group's `template_count` attribute, checked to be in range.
+fn template_count(group: &hdf5::Group, resolution: i32) -> anyhow::Result<usize> {
     let count: i64 = group.attr("template_count")?.read_scalar()?;
-    if count <= 0 {
+    let n = usize::try_from(count.max(0))?;
+    if n > MAX_TEMPLATES_PER_GROUP {
+        anyhow::bail!(
+            "group {resolution}: template_count {n} is over the limit of {MAX_TEMPLATES_PER_GROUP}"
+        );
+    }
+    Ok(n)
+}
+
+/// Dataset `name` of `group`, checked to have exactly `shape` before it is
+/// read: `template_count` is only an attribute of the file, and a dataset's
+/// declared shape sizes the buffer `read_raw` allocates.
+fn sized_dataset(
+    group: &hdf5::Group,
+    resolution: i32,
+    name: &str,
+    shape: &[usize],
+) -> anyhow::Result<hdf5::Dataset> {
+    let dataset = group.dataset(name)?;
+    if dataset.shape() != shape {
+        anyhow::bail!(
+            "group {resolution}: template_count is {} but {name} has shape {:?}, expected {shape:?}",
+            shape[0],
+            dataset.shape()
+        );
+    }
+    Ok(dataset)
+}
+
+/// A string read from the file as an owned `String`. `VarLenUnicode`'s own
+/// `to_string` trusts the pointer HDF5 handed back to be non-null and UTF-8;
+/// an unwritten or foreign dataset breaks both.
+fn vlen_to_string(s: &VarLenUnicode) -> anyhow::Result<String> {
+    if s.as_ptr().is_null() {
+        anyhow::bail!("null string in database");
+    }
+    Ok(std::str::from_utf8(s.as_bytes())?.to_owned())
+}
+
+fn read_group(group: &hdf5::Group, resolution: i32) -> anyhow::Result<Vec<IconTemplate>> {
+    let n = template_count(group, resolution)?;
+    if n == 0 {
         return Ok(Vec::new());
     }
-    let n = count as usize;
     let icon_size = crate::database::icon_size_for_resolution(resolution) as usize;
     let image_len = icon_size * icon_size * 3;
 
-    let images: Vec<u8> = group.dataset("images")?.read_raw()?;
-    let codes: Vec<VarLenUnicode> = group.dataset("codes")?.read_raw()?;
-    let mods: Vec<VarLenUnicode> = group.dataset("mods")?.read_raw()?;
-    let crated: Vec<bool> = group.dataset("crated")?.read_raw()?;
-    let faction: Vec<u8> = group.dataset("faction")?.read_raw()?;
-    let category: Vec<u8> = group.dataset("category")?.read_raw()?;
-    let phash: Vec<u64> = group.dataset("phash")?.read_raw()?;
-
-    // `template_count` is only an attribute of the file: check it against
-    // what the datasets really hold before indexing them with it.
-    let lengths = [
-        ("images", images.len() / image_len),
-        ("codes", codes.len()),
-        ("mods", mods.len()),
-        ("crated", crated.len()),
-        ("faction", faction.len()),
-        ("category", category.len()),
-        ("phash", phash.len()),
-    ];
-    if !images.len().is_multiple_of(image_len) {
-        anyhow::bail!(
-            "group {resolution}: images holds {} bytes, not a whole number of {image_len}-byte icons",
-            images.len()
-        );
-    }
-    if let Some((name, len)) = lengths.iter().find(|(_, len)| *len != n) {
-        anyhow::bail!("group {resolution}: template_count is {n} but {name} holds {len} entries");
-    }
+    let column = |name: &str| sized_dataset(group, resolution, name, &[n]);
+    let images: Vec<u8> =
+        sized_dataset(group, resolution, "images", &[n, icon_size, icon_size, 3])?.read_raw()?;
+    let codes: Vec<VarLenUnicode> = column("codes")?.read_raw()?;
+    let mods: Vec<VarLenUnicode> = column("mods")?.read_raw()?;
+    let crated: Vec<bool> = column("crated")?.read_raw()?;
+    let faction: Vec<u8> = column("faction")?.read_raw()?;
+    let category: Vec<u8> = column("category")?.read_raw()?;
+    let phash: Vec<u64> = column("phash")?.read_raw()?;
 
     let mut templates = Vec::with_capacity(n);
     for i in 0..n {
         templates.push(IconTemplate {
             image: images[i * image_len..(i + 1) * image_len].to_vec(),
-            code: codes[i].to_string(),
-            mod_name: mods[i].to_string(),
+            code: vlen_to_string(&codes[i])?,
+            mod_name: vlen_to_string(&mods[i])?,
             faction: ItemFaction::from_index(faction[i]),
             category: ItemCategory::from_index(category[i]),
             crated: crated[i],
@@ -426,12 +454,76 @@ mod tests {
             group
                 .attr("template_count")
                 .unwrap()
-                .write_scalar(&i64::MAX)
+                .write_scalar(&4i64)
                 .unwrap();
         }
 
         let err = read_database(&path).unwrap_err();
-        assert!(err.to_string().contains("template_count"), "{err}");
+        assert!(err.to_string().contains("template_count is 4"), "{err}");
+    }
+
+    #[test]
+    fn rejects_unwritten_strings_instead_of_reading_null_pointers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("db.h5");
+        write_two_mod_database(&path);
+        {
+            let file = hdf5::File::open_rw(&path).unwrap();
+            let group = file.group("1080").unwrap();
+            group.unlink("codes").unwrap();
+            group
+                .new_dataset::<VarLenUnicode>()
+                .shape(3)
+                .create("codes")
+                .unwrap();
+        }
+
+        let err = read_database(&path).unwrap_err();
+        assert!(err.to_string().contains("null string"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_template_count_over_the_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("db.h5");
+        write_two_mod_database(&path);
+        {
+            let file = hdf5::File::open_rw(&path).unwrap();
+            let group = file.group("1080").unwrap();
+            group
+                .attr("template_count")
+                .unwrap()
+                .write_scalar(&(MAX_TEMPLATES_PER_GROUP as i64 + 1))
+                .unwrap();
+        }
+
+        let err = read_database(&path).unwrap_err();
+        assert!(err.to_string().contains("over the limit"), "{err}");
+        let err = read_statistics(&path).unwrap_err();
+        assert!(err.to_string().contains("over the limit"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_dataset_shape_that_does_not_match_template_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("db.h5");
+        write_two_mod_database(&path);
+        {
+            // A huge declared shape costs nothing on disk (it is never
+            // written), but reading it would allocate its full size.
+            let file = hdf5::File::open_rw(&path).unwrap();
+            let group = file.group("1080").unwrap();
+            group.unlink("images").unwrap();
+            group
+                .new_dataset::<u8>()
+                .chunk((1, 32, 32, 3))
+                .shape((1usize << 30, 32, 32, 3))
+                .create("images")
+                .unwrap();
+        }
+
+        let err = read_database(&path).unwrap_err();
+        assert!(err.to_string().contains("images has shape"), "{err}");
     }
 
     #[test]
