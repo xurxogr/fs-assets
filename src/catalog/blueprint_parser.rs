@@ -40,6 +40,10 @@ use crate::catalog::utils::{parse_reference, simplify_value};
 /// the algorithm below.
 pub type AssetLoader<'a> = dyn Fn(&str) -> Option<Value> + 'a;
 
+/// Longest blueprint parent chain followed. The game's own chains are a
+/// handful of levels; a mod could chain thousands of blueprints.
+const MAX_PARENT_DEPTH: usize = 64;
+
 /// Extract simplified catalog data from an already-parsed blueprint asset.
 ///
 /// `object_path` is this blueprint's own `/Game/...` object path (used to
@@ -77,7 +81,9 @@ fn extract_catalog_data_impl(
     loader: &AssetLoader,
     visited: &mut HashSet<String>,
 ) -> Option<Value> {
-    if !visited.insert(object_path.to_string()) {
+    // `visited` holds the chain walked so far: stop on a cycle, and on a chain
+    // long enough to exhaust the stack (each level recurses back into here).
+    if visited.len() >= MAX_PARENT_DEPTH || !visited.insert(object_path.to_string()) {
         return None;
     }
 
@@ -438,22 +444,13 @@ pub fn find_blueprint_path(blueprints_dir: &Path, requested: &Path) -> Option<Pa
 }
 
 fn find_file_recursive(dir: &Path, filename: &OsStr) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(dir).ok()?;
-    let mut subdirs = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            subdirs.push(path);
-        } else if path.file_name() == Some(filename) {
-            return Some(path);
-        }
-    }
-    for subdir in subdirs {
-        if let Some(found) = find_file_recursive(&subdir, filename) {
-            return Some(found);
-        }
-    }
-    None
+    // `walkdir` doesn't follow symlinks (so a link back up the tree can't
+    // loop) and walks without recursing.
+    walkdir::WalkDir::new(dir)
+        .into_iter()
+        .flatten()
+        .find(|entry| entry.file_type().is_file() && entry.file_name() == filename)
+        .map(walkdir::DirEntry::into_path)
 }
 
 /// Builds a filesystem-backed [`AssetLoader`]: maps a `/Game/Blueprints/...`
@@ -734,6 +731,47 @@ mod tests {
             );
         }
 
+        /// Blueprint `BP{i}` whose parent is `BP{i + 1}`, holding property
+        /// `Level{i}`.
+        fn chained_asset(i: usize) -> Value {
+            json!({
+                "imports": [
+                    {"object_name": format!("BP{}_C", i + 1), "class_name": "BlueprintGeneratedClass", "class_package": "/Script/Engine", "outer_index": -2},
+                    {"object_name": format!("/Game/Blueprints/Items/BP{}", i + 1), "class_name": "Package", "class_package": "/Script/CoreUObject", "outer_index": 0},
+                ],
+                "exports": [
+                    {"object_name": format!("BP{i}_C"), "class_index": 0, "super_index": -1, "template_index": 0, "outer_index": 0, "kind": "normal", "properties": {}},
+                    {
+                        "object_name": format!("Default__BP{i}_C"), "class_index": 1, "super_index": 0, "template_index": 0, "outer_index": 0,
+                        "kind": "normal",
+                        "properties": {format!("Level{i}"): i},
+                    },
+                ],
+            })
+        }
+
+        #[test]
+        fn stops_following_a_parent_chain_at_max_depth() {
+            let chain = 10_000;
+            let assets: HashMap<String, Value> = (1..chain)
+                .map(|i| (format!("/Game/Blueprints/Items/BP{i}"), chained_asset(i)))
+                .collect();
+            let loader = map_loader(assets);
+
+            let result = extract_catalog_data(
+                "/Game/Blueprints/Items/BP0",
+                &chained_asset(0),
+                false,
+                &loader,
+            )
+            .expect("expected catalog data");
+
+            assert_eq!(result["Level0"], json!(0));
+            let last = MAX_PARENT_DEPTH - 1;
+            assert_eq!(result[format!("Level{last}")], json!(last));
+            assert!(result.get(format!("Level{MAX_PARENT_DEPTH}")).is_none());
+        }
+
         #[test]
         fn multi_level_inheritance_chain_merges_all_ancestors() {
             let grandparent_asset = json!({
@@ -988,6 +1026,22 @@ mod tests {
                 blueprint_candidate(blueprints_dir, "/Game/Blueprints//Game/Foo/X"),
                 Some(blueprints_dir.join("Game/Foo/X.uasset"))
             );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn does_not_follow_a_symlink_loop() {
+            let tmp = tempfile_dir();
+            let blueprints_dir = tmp.join("Blueprints");
+            std::fs::create_dir_all(blueprints_dir.join("Structures/Sub")).unwrap();
+            std::os::unix::fs::symlink(
+                blueprints_dir.join("Structures"),
+                blueprints_dir.join("Structures/Sub/loop"),
+            )
+            .unwrap();
+
+            let requested = blueprints_dir.join("Structures/BPGone.uasset");
+            assert_eq!(find_blueprint_path(&blueprints_dir, &requested), None);
         }
 
         fn tempfile_dir() -> PathBuf {

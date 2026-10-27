@@ -50,34 +50,25 @@ pub struct CatalogStats {
 /// Used for each `SEARCH_DIRECTORIES` entry. Returns an empty list (rather
 /// than erroring) if `dir` doesn't exist.
 pub fn collect_blueprint_files(dir: &Path) -> Vec<PathBuf> {
-    let mut results = Vec::new();
-    collect_blueprint_files_into(dir, &mut results);
+    // `walkdir` doesn't follow symlinks (so a link back up the tree can't
+    // loop) and walks without recursing.
+    let mut results: Vec<PathBuf> = walkdir::WalkDir::new(dir)
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.file_type().is_file())
+        .map(walkdir::DirEntry::into_path)
+        .filter(|path| {
+            if path.extension().and_then(|e| e.to_str()) != Some("uasset") {
+                return false;
+            }
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            !EXCLUDE_PATTERNS
+                .iter()
+                .any(|pattern| stem.contains(pattern))
+        })
+        .collect();
     results.sort();
     results
-}
-
-fn collect_blueprint_files_into(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_blueprint_files_into(&path, out);
-            continue;
-        }
-        if path.extension().and_then(|e| e.to_str()) != Some("uasset") {
-            continue;
-        }
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        if EXCLUDE_PATTERNS
-            .iter()
-            .any(|pattern| stem.contains(pattern))
-        {
-            continue;
-        }
-        out.push(path);
-    }
 }
 
 /// Build the complete catalog from a real extraction directory (e.g. the
@@ -399,6 +390,17 @@ mod tests {
             let files = collect_blueprint_files(tmp.path());
             assert_eq!(files.len(), 1);
             assert!(files[0].ends_with("BPRifle.uasset"));
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn does_not_follow_a_symlink_loop() {
+            let tmp = tempfile::tempdir().unwrap();
+            touch(&tmp.path().join("Sub/Rifle.uasset"));
+            std::os::unix::fs::symlink(tmp.path(), tmp.path().join("Sub/loop")).unwrap();
+
+            let files = collect_blueprint_files(tmp.path());
+            assert_eq!(files, vec![tmp.path().join("Sub/Rifle.uasset")]);
         }
 
         #[test]
