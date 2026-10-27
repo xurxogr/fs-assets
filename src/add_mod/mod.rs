@@ -40,6 +40,32 @@ pub enum AssetSource {
     Pak(Vec<PathBuf>),
 }
 
+impl AssetSource {
+    /// The directory this source's `icons` are read from: an extraction
+    /// directory as is, or `dir` with the `icons` its paks contain extracted
+    /// into it, reporting progress to `progress`. When `required`, paks that
+    /// contain none of `icons` are an error.
+    fn icons_dir(
+        &self,
+        icons: &HashSet<String>,
+        dir: PathBuf,
+        required: bool,
+        progress: &dyn Fn(usize, usize),
+    ) -> anyhow::Result<PathBuf> {
+        match self {
+            AssetSource::ExtractDir(source_dir) => Ok(source_dir.clone()),
+            AssetSource::Pak(paks) => {
+                let extracted =
+                    extract_paks(paks, |path| is_referenced_icon(path, icons), &dir, progress)?;
+                if required && extracted == 0 {
+                    anyhow::bail!("{} has none of the catalog's icons", describe_paks(paks));
+                }
+                Ok(dir)
+            }
+        }
+    }
+}
+
 /// Everything one `add-mod` run needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddModRequest {
@@ -165,37 +191,24 @@ pub fn add_mod(
     let report =
         |stage: Stage| move |done: usize, total: usize| progress(Progress { stage, done, total });
 
-    let mod_dir = match &request.source {
-        AssetSource::ExtractDir(dir) => dir.clone(),
-        AssetSource::Pak(paks) => {
-            let dir = workspace.path().join("mod");
-            let extracted = extract_paks(
-                paks,
-                |path| is_referenced_icon(path, &icons),
-                &dir,
-                &report(Stage::ExtractingIcons),
-            )?;
-            if extracted == 0 {
-                anyhow::bail!("{} has none of the catalog's icons", describe_paks(paks));
-            }
-            dir
-        }
-    };
-    let vanilla_dir = match &request.vanilla {
-        None => None,
-        Some(AssetSource::ExtractDir(dir)) => Some(dir.clone()),
-        Some(AssetSource::Pak(paks)) => {
-            let overlays = overlay_icon_paths(&catalog);
-            let dir = workspace.path().join("vanilla");
-            extract_paks(
-                paks,
-                |path| is_referenced_icon(path, &overlays),
-                &dir,
+    let mod_dir = request.source.icons_dir(
+        &icons,
+        workspace.path().join("mod"),
+        true,
+        &report(Stage::ExtractingIcons),
+    )?;
+    let vanilla_dir = request
+        .vanilla
+        .as_ref()
+        .map(|vanilla| {
+            vanilla.icons_dir(
+                &overlay_icon_paths(&catalog),
+                workspace.path().join("vanilla"),
+                false,
                 &report(Stage::ExtractingVanillaIcons),
-            )?;
-            Some(dir)
-        }
-    };
+            )
+        })
+        .transpose()?;
 
     database::pipeline::add_mod_to_database_with_progress(
         &mod_dir,

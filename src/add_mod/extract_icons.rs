@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use image::DynamicImage;
 
-use super::{describe_paks, extract_paks, is_referenced_icon, load_catalog, AssetSource};
+use super::{load_catalog, AssetSource};
 use crate::database::pipeline::{decode_icon, filesystem_icon_loader_with_fallback};
 use crate::database::{self, CatalogIconItem};
 
@@ -60,37 +60,23 @@ pub fn extract_icons(request: &ExtractIconsRequest) -> anyhow::Result<ExtractIco
     wanted.extend(subicon_paths.iter().cloned());
 
     let workspace = tempfile::tempdir()?;
-    let source_dir = match &request.source {
-        AssetSource::ExtractDir(dir) => dir.clone(),
-        AssetSource::Pak(paks) => {
-            let dir = workspace.path().join("source");
-            let extracted = extract_paks(
-                paks,
-                |path| is_referenced_icon(path, &wanted),
-                &dir,
+    let source_dir =
+        request
+            .source
+            .icons_dir(&wanted, workspace.path().join("source"), true, &|_, _| {})?;
+    let vanilla_dir = request
+        .vanilla
+        .as_ref()
+        .filter(|_| !subicon_paths.is_empty())
+        .map(|vanilla| {
+            vanilla.icons_dir(
+                &subicon_paths,
+                workspace.path().join("vanilla"),
+                false,
                 &|_, _| {},
-            )?;
-            if extracted == 0 {
-                anyhow::bail!("{} has none of the catalog's icons", describe_paks(paks));
-            }
-            dir
-        }
-    };
-    let vanilla_dir = match &request.vanilla {
-        Some(_) if subicon_paths.is_empty() => None,
-        None => None,
-        Some(AssetSource::ExtractDir(dir)) => Some(dir.clone()),
-        Some(AssetSource::Pak(paks)) => {
-            let dir = workspace.path().join("vanilla");
-            extract_paks(
-                paks,
-                |path| is_referenced_icon(path, &subicon_paths),
-                &dir,
-                &|_, _| {},
-            )?;
-            Some(dir)
-        }
-    };
+            )
+        })
+        .transpose()?;
     let resolve =
         filesystem_icon_loader_with_fallback(&source_dir, vanilla_dir.as_deref(), &subicon_paths);
 
