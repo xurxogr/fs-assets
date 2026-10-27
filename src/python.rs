@@ -160,8 +160,9 @@ fn write_json(path: &Path, value: &[serde_json::Value]) -> PyResult<()> {
 ///     List of extracted file paths (relative to `output`).
 #[pyfunction]
 #[pyo3(signature = (pak, output, *, include=None))]
-fn unpak(pak: &str, output: &str, include: Option<&str>) -> PyResult<Vec<String>> {
-    crate::pak::extract(Path::new(pak), include, Path::new(output)).map_err(to_py_err)
+fn unpak(py: Python<'_>, pak: &str, output: &str, include: Option<&str>) -> PyResult<Vec<String>> {
+    py.detach(|| crate::pak::extract(Path::new(pak), include, Path::new(output)))
+        .map_err(to_py_err)
 }
 
 /// Convert a single .uasset to JSON.
@@ -173,7 +174,9 @@ fn unpak(pak: &str, output: &str, include: Option<&str>) -> PyResult<Vec<String>
 ///     Parsed asset contents as a dict.
 #[pyfunction]
 fn convert_to_json(py: Python<'_>, path: &str) -> PyResult<Py<PyAny>> {
-    let value = convert::uasset_to_json(Path::new(path)).map_err(to_py_err)?;
+    let value = py
+        .detach(|| convert::uasset_to_json(Path::new(path)))
+        .map_err(to_py_err)?;
     json_to_py(py, &value)
 }
 
@@ -185,8 +188,9 @@ fn convert_to_json(py: Python<'_>, path: &str) -> PyResult<Py<PyAny>> {
 /// Returns:
 ///     PNG-encoded image bytes.
 #[pyfunction]
-fn convert_to_png(path: &str) -> PyResult<Vec<u8>> {
-    convert::uasset_to_png(Path::new(path)).map_err(to_py_err)
+fn convert_to_png(py: Python<'_>, path: &str) -> PyResult<Vec<u8>> {
+    py.detach(|| convert::uasset_to_png(Path::new(path)))
+        .map_err(to_py_err)
 }
 
 /// Build the item/vehicle/structure catalog from an extracted pak directory
@@ -366,6 +370,7 @@ fn add_mod(
 ))]
 #[allow(clippy::too_many_arguments)]
 fn modify_icon(
+    py: Python<'_>,
     db: &str,
     code: &str,
     faction: &str,
@@ -387,14 +392,16 @@ fn modify_icon(
     let resolutions =
         database::resolve_resolutions(&resolution.unwrap_or_default()).map_err(to_py_err)?;
 
-    database::pipeline::modify_icon_in_database(
-        &identity,
-        icon.map(Path::new),
-        &resolutions,
-        replace,
-        remove,
-        Path::new(db),
-    )
+    py.detach(|| {
+        database::pipeline::modify_icon_in_database(
+            &identity,
+            icon.map(Path::new),
+            &resolutions,
+            replace,
+            remove,
+            Path::new(db),
+        )
+    })
     .map_err(to_py_err)
 }
 
@@ -410,9 +417,16 @@ fn modify_icon(
 ///     List of packed file paths (relative to `input`).
 #[pyfunction]
 #[pyo3(signature = (input, output, *, mount_point="../../../", version="v8b"))]
-fn pack(input: &str, output: &str, mount_point: &str, version: &str) -> PyResult<Vec<String>> {
+fn pack(
+    py: Python<'_>,
+    input: &str,
+    output: &str,
+    mount_point: &str,
+    version: &str,
+) -> PyResult<Vec<String>> {
     let version = parse_pak_version(version)?;
-    crate::pak::pack(Path::new(input), Path::new(output), mount_point, version).map_err(to_py_err)
+    py.detach(|| crate::pak::pack(Path::new(input), Path::new(output), mount_point, version))
+        .map_err(to_py_err)
 }
 
 /// Decode a `.locres` file into an editable JSON translation file (see the
@@ -434,12 +448,15 @@ fn locres_dump(
     output: &str,
     reference: Option<&str>,
 ) -> PyResult<Py<PyAny>> {
-    let dumped = locres::dump(Path::new(input), reference.map(Path::new)).map_err(to_py_err)?;
-    let file = std::fs::File::create(output).map_err(io_err)?;
-    serde_json::to_writer_pretty(file, &dumped)
-        .map_err(|e| PyErr::new::<PyRuntimeError, _>(e.to_string()))?;
+    let namespaces = py.detach(|| -> PyResult<usize> {
+        let dumped = locres::dump(Path::new(input), reference.map(Path::new)).map_err(to_py_err)?;
+        let file = std::fs::File::create(output).map_err(io_err)?;
+        serde_json::to_writer_pretty(file, &dumped)
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(e.to_string()))?;
+        Ok(dumped.namespaces.len())
+    })?;
 
-    let stats_json = serde_json::json!({ "namespaces": dumped.namespaces.len() });
+    let stats_json = serde_json::json!({ "namespaces": namespaces });
     json_to_py(py, &stats_json)
 }
 
@@ -450,12 +467,14 @@ fn locres_dump(
 ///     input: Path to the edited JSON translation file.
 ///     output: Path to write the `.locres` to.
 #[pyfunction]
-fn locres_pack(input: &str, output: &str) -> PyResult<()> {
-    let file = std::fs::File::open(input).map_err(io_err)?;
-    let dump_doc: locres::DumpDocument = serde_json::from_reader(file)
-        .map_err(|e| PyErr::new::<PyRuntimeError, _>(e.to_string()))?;
-    let doc = locres::pack(&dump_doc).map_err(to_py_err)?;
-    locres::write(&doc, Path::new(output)).map_err(to_py_err)
+fn locres_pack(py: Python<'_>, input: &str, output: &str) -> PyResult<()> {
+    py.detach(|| {
+        let file = std::fs::File::open(input).map_err(io_err)?;
+        let dump_doc: locres::DumpDocument = serde_json::from_reader(file)
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(e.to_string()))?;
+        let doc = locres::pack(&dump_doc).map_err(to_py_err)?;
+        locres::write(&doc, Path::new(output)).map_err(to_py_err)
+    })
 }
 
 /// Search `.uasset`/`.uexp` files under a directory for a literal string,
@@ -471,7 +490,9 @@ fn locres_pack(input: &str, output: &str) -> PyResult<()> {
 ///     List of dicts with `path` and `encoding` ("ascii" or "utf16le").
 #[pyfunction]
 fn grep_strings(py: Python<'_>, pattern: &str, content_dir: &str) -> PyResult<Py<PyAny>> {
-    let matches = grep::search_content_dir(Path::new(content_dir), pattern).map_err(to_py_err)?;
+    let matches = py
+        .detach(|| grep::search_content_dir(Path::new(content_dir), pattern))
+        .map_err(to_py_err)?;
     let matches_json: Vec<serde_json::Value> = matches
         .iter()
         .map(|m| {
