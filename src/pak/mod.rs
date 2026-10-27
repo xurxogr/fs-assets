@@ -22,10 +22,22 @@ pub fn extract(
     include: Option<&str>,
     output_dir: &Path,
 ) -> anyhow::Result<Vec<String>> {
-    extract_matching(
+    extract_with_progress(pak, include, output_dir, &|_, _| Ok(()))
+}
+
+/// Same as [`extract`], reporting progress as
+/// [`extract_matching_with_progress`] does.
+pub fn extract_with_progress(
+    pak: &Path,
+    include: Option<&str>,
+    output_dir: &Path,
+    progress: &dyn Fn(usize, usize) -> anyhow::Result<()>,
+) -> anyhow::Result<Vec<String>> {
+    extract_matching_with_progress(
         pak,
         |path| include.is_none_or(|filter| path.contains(filter)),
         output_dir,
+        progress,
     )
 }
 
@@ -275,6 +287,20 @@ pub fn pack(
     mount_point: &str,
     version: repak::Version,
 ) -> anyhow::Result<Vec<String>> {
+    pack_with_progress(input_dir, output, mount_point, version, &|_, _| Ok(()))
+}
+
+/// Same as [`pack`], reporting `(done, total)` over the packed files to
+/// `progress`: once before the first file and once after each. An error
+/// `progress` returns stops the pack, leaving `output` as it was, and is
+/// returned.
+pub fn pack_with_progress(
+    input_dir: &Path,
+    output: &Path,
+    mount_point: &str,
+    version: repak::Version,
+    progress: &dyn Fn(usize, usize) -> anyhow::Result<()>,
+) -> anyhow::Result<Vec<String>> {
     let output_file = output.canonicalize().ok();
     let mut files = Vec::new();
     for entry in walkdir::WalkDir::new(input_dir) {
@@ -312,13 +338,16 @@ pub fn pack(
         None,
     );
 
-    let mut written = Vec::new();
+    let total = files.len();
+    progress(0, total)?;
+    let mut written = Vec::with_capacity(total);
     for (path, rel_str) in files {
         let data = fs::read(&path)?;
         writer
             .write_file(&rel_str, false, data)
             .map_err(|e| anyhow::anyhow!("failed to write {rel_str}: {e}"))?;
         written.push(rel_str);
+        progress(written.len(), total)?;
     }
 
     writer.write_index()?.flush()?;

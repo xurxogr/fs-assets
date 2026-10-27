@@ -43,6 +43,17 @@ pub struct GrepMatch {
 /// by path then encoding. A directory or file that can't be read (or a
 /// missing `content_dir`) fails the search rather than silently narrowing it.
 pub fn search_content_dir(content_dir: &Path, pattern: &str) -> anyhow::Result<Vec<GrepMatch>> {
+    search_content_dir_with_progress(content_dir, pattern, &|_, _| Ok(()))
+}
+
+/// Same as [`search_content_dir`], reporting `(done, total)` over the
+/// searched files to `progress`: once before the first file and once after
+/// each. An error `progress` returns stops the search and is returned.
+pub fn search_content_dir_with_progress(
+    content_dir: &Path,
+    pattern: &str,
+    progress: &dyn Fn(usize, usize) -> anyhow::Result<()>,
+) -> anyhow::Result<Vec<GrepMatch>> {
     let utf16_needle: Vec<u8> = pattern
         .encode_utf16()
         .flat_map(|unit| unit.to_le_bytes())
@@ -50,20 +61,23 @@ pub fn search_content_dir(content_dir: &Path, pattern: &str) -> anyhow::Result<V
     let ascii = pattern.is_ascii().then(|| Finder::new(pattern.as_bytes()));
     let utf16 = Finder::new(&utf16_needle);
 
-    let mut matches = Vec::new();
+    let mut files = Vec::new();
     for entry in walkdir::WalkDir::new(content_dir) {
         let entry = entry?;
-        if !entry.file_type().is_file() {
-            continue;
+        let is_asset = entry
+            .path()
+            .extension()
+            .is_some_and(|ext| ext == "uasset" || ext == "uexp");
+        if entry.file_type().is_file() && is_asset {
+            files.push(entry.into_path());
         }
-        let path = entry.path();
-        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-            continue;
-        };
-        if ext != "uasset" && ext != "uexp" {
-            continue;
-        }
+    }
 
+    let total = files.len();
+    progress(0, total)?;
+    let mut matches = Vec::new();
+    for (done, path) in files.iter().enumerate() {
+        let path = path.as_path();
         let data = std::fs::read(path)?;
         if ascii
             .as_ref()
@@ -80,6 +94,7 @@ pub fn search_content_dir(content_dir: &Path, pattern: &str) -> anyhow::Result<V
                 encoding: Encoding::Utf16Le,
             });
         }
+        progress(done + 1, total)?;
     }
 
     matches.sort_by(|a, b| a.path.cmp(&b.path).then(a.encoding.cmp(&b.encoding)));

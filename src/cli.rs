@@ -463,7 +463,10 @@ fn run_command(command: Commands) -> anyhow::Result<()> {
                 output,
                 subicons: !no_subicons,
             };
-            let stats = add_mod::extract_icons(&request)?;
+            let stats = add_mod::extract_icons(&request, &|update| {
+                print_progress(update);
+                Ok(())
+            })?;
             println!(
                 "written {} icons_missing {} decode_errors {} subicons_missing {}",
                 stats.written, stats.icons_missing, stats.decode_errors, stats.subicons_missing

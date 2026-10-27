@@ -8,6 +8,7 @@ present locally, since those fixtures aren't checked into the repo.
 import importlib
 import importlib.metadata
 import json
+import signal
 import struct
 import zlib
 from pathlib import Path
@@ -293,8 +294,6 @@ def test_read_templates_rejects_an_unsupported_resolution(tmp_path):
 
 
 def test_cli_main_restores_the_sigint_handler(tmp_path):
-    import signal
-
     before = signal.getsignal(signal.SIGINT)
     assert fs_assets.cli_main(["fs-assets", "grep-strings", "x", str(tmp_path / "missing")]) == 1
     assert signal.getsignal(signal.SIGINT) is before
@@ -334,6 +333,66 @@ def test_unpak_extracts_what_pack_wrote(tmp_path):
     assert extracted == ["War/Content/a.uasset"]
     assert (out / "War" / "Content" / "a.uasset").read_bytes() == b"first"
     assert not (out / "War" / "Content" / "b.uexp").exists()
+
+
+def _long_operations(tmp_path):
+    """Each long operation without its own progress test, as a callable taking
+    `progress`, with the stage it reports."""
+    content = tmp_path / "content"
+    (content / "War" / "Content").mkdir(parents=True)
+    (content / "War" / "Content" / "a.uasset").write_bytes(b"first")
+    pak = tmp_path / "test.pak"
+    fs_assets.pack(content, pak)
+    return {
+        "unpak": (
+            "extracting",
+            lambda progress: fs_assets.unpak(pak, tmp_path / "out", progress=progress),
+        ),
+        "pack": (
+            "packing",
+            lambda progress: fs_assets.pack(content, tmp_path / "re.pak", progress=progress),
+        ),
+        "grep_strings": (
+            "searching",
+            lambda progress: fs_assets.grep_strings("x", content, progress=progress),
+        ),
+        "extract_icons": (
+            "extracting_icons",
+            lambda progress: fs_assets.extract_icons(
+                pak=_icon_mod_pak(tmp_path),
+                catalog=_catalog(tmp_path),
+                output=tmp_path / "icons",
+                progress=progress,
+            ),
+        ),
+    }
+
+
+@pytest.mark.parametrize("operation", ["unpak", "pack", "grep_strings", "extract_icons"])
+def test_long_operations_report_progress(tmp_path, operation):
+    stage, run = _long_operations(tmp_path)[operation]
+    reports = []
+
+    run(lambda *report: reports.append(report))
+
+    assert reports[0][0] == stage
+    assert reports[-1][1] == reports[-1][2]
+
+
+@pytest.mark.parametrize("operation", ["unpak", "pack", "grep_strings", "extract_icons"])
+def test_ctrl_c_stops_long_operations(tmp_path, operation):
+    _, run = _long_operations(tmp_path)[operation]
+    calls = []
+
+    def interrupt(*report):
+        calls.append(report)
+        signal.raise_signal(signal.SIGINT)
+
+    with pytest.raises(KeyboardInterrupt):
+        run(interrupt)
+
+    assert len(calls) == 1
+    assert not (tmp_path / "re.pak").exists()
 
 
 def test_locres_pack_and_dump_round_trip(tmp_path):

@@ -1,10 +1,11 @@
-//! Progress reporting for an `add-mod` run: which stage it is in and how far
-//! through that stage it is, so a caller (the CLI, or a GUI through the
-//! Python bindings) can show it.
+//! Progress reporting for an `add-mod` or `extract-icons` run: which stage
+//! it is in and how far through that stage it is, so a caller (the CLI, or a
+//! GUI through the Python bindings) can show it.
 
 use std::fmt;
 
-/// One stage of an `add-mod` run, in the order a run goes through them.
+/// One stage of an `add-mod` or `extract-icons` run, in the order a run goes
+/// through them.
 /// Stages that don't apply (e.g. extraction when the source is already a
 /// directory) are skipped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +16,8 @@ pub enum Stage {
     ExtractingVanillaIcons,
     /// Decoding icons into templates, one step per catalog entry.
     BuildingTemplates,
+    /// Writing `extract-icons`' PNGs, one step per catalog item.
+    WritingIcons,
 }
 
 impl Stage {
@@ -24,6 +27,7 @@ impl Stage {
             Stage::ExtractingIcons => "extracting_icons",
             Stage::ExtractingVanillaIcons => "extracting_vanilla_icons",
             Stage::BuildingTemplates => "building_templates",
+            Stage::WritingIcons => "writing_icons",
         }
     }
 }

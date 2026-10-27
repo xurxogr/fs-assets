@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use image::DynamicImage;
 
-use super::{load_catalog, AssetSource};
+use super::{load_catalog, AssetSource, Progress, Stage};
 use crate::database::pipeline::{decode_icon, filesystem_icon_loader_with_fallback};
 use crate::database::{self, CatalogIconItem};
 
@@ -42,8 +42,15 @@ pub struct ExtractIconsStats {
 }
 
 /// Writes `request.catalog`'s icons found in `request.source` into
-/// `request.output`, one `<CodeName>.png` per item.
-pub fn extract_icons(request: &ExtractIconsRequest) -> anyhow::Result<ExtractIconsStats> {
+/// `request.output`, one `<CodeName>.png` per item, reporting each stage's
+/// progress to `progress`. An error `progress` returns stops the run and is
+/// returned.
+pub fn extract_icons(
+    request: &ExtractIconsRequest,
+    progress: &dyn Fn(Progress) -> anyhow::Result<()>,
+) -> anyhow::Result<ExtractIconsStats> {
+    let report =
+        |stage: Stage| move |done: usize, total: usize| progress(Progress { stage, done, total });
     let catalog = load_catalog(&request.catalog)?;
     let items: Vec<_> = catalog
         .iter()
@@ -60,12 +67,12 @@ pub fn extract_icons(request: &ExtractIconsRequest) -> anyhow::Result<ExtractIco
     wanted.extend(subicon_paths.iter().cloned());
 
     let workspace = tempfile::tempdir()?;
-    let source_dir =
-        request
-            .source
-            .icons_dir(&wanted, workspace.path().join("source"), true, &|_, _| {
-                Ok(())
-            })?;
+    let source_dir = request.source.icons_dir(
+        &wanted,
+        workspace.path().join("source"),
+        true,
+        &report(Stage::ExtractingIcons),
+    )?;
     let vanilla_dir = request
         .vanilla
         .as_ref()
@@ -75,14 +82,20 @@ pub fn extract_icons(request: &ExtractIconsRequest) -> anyhow::Result<ExtractIco
                 &subicon_paths,
                 workspace.path().join("vanilla"),
                 false,
-                &|_, _| Ok(()),
+                &report(Stage::ExtractingVanillaIcons),
             )
         })
         .transpose()?;
     let resolve =
         filesystem_icon_loader_with_fallback(&source_dir, vanilla_dir.as_deref(), &subicon_paths);
 
-    write_icons(&items, resolve, request.subicons, &request.output)
+    write_icons(
+        &items,
+        resolve,
+        request.subicons,
+        &request.output,
+        &report(Stage::WritingIcons),
+    )
 }
 
 /// Decodes each of `items`' icons through `resolve` and writes it into
@@ -96,6 +109,7 @@ fn write_icons<F>(
     resolve: F,
     subicons: bool,
     output: &Path,
+    progress: &dyn Fn(usize, usize) -> anyhow::Result<()>,
 ) -> anyhow::Result<ExtractIconsStats>
 where
     F: Fn(&str) -> Option<PathBuf>,
@@ -115,7 +129,10 @@ where
     std::fs::create_dir_all(output)?;
     let mut stats = ExtractIconsStats::default();
     let mut subicon_cache: HashMap<String, Option<DynamicImage>> = HashMap::new();
-    for item in items {
+    // Reported before each item rather than after, since a missing or
+    // undecodable icon skips the rest of its iteration.
+    for (done, item) in items.iter().enumerate() {
+        progress(done, items.len())?;
         let Some(path) = resolve(&item.icon_path) else {
             stats.icons_missing += 1;
             continue;
@@ -151,6 +168,7 @@ where
         png.save(output.join(format!("{}.png", item.code)))?;
         stats.written += 1;
     }
+    progress(items.len(), items.len())?;
 
     Ok(stats)
 }
@@ -230,7 +248,7 @@ mod tests {
         .collect();
         let out = tmp.path().join("out");
 
-        let stats = write_icons(&items(), resolver(files), true, &out).unwrap();
+        let stats = write_icons(&items(), resolver(files), true, &out, &|_, _| Ok(())).unwrap();
 
         assert_eq!(
             stats,
@@ -269,7 +287,13 @@ mod tests {
             }];
             let out = tmp.path().join("nested/out");
 
-            let result = write_icons(&items, resolver([(icon_path, file)].into()), false, &out);
+            let result = write_icons(
+                &items,
+                resolver([(icon_path, file)].into()),
+                false,
+                &out,
+                &|_, _| Ok(()),
+            );
 
             assert!(result.is_err(), "{code:?}");
             assert!(!out.exists(), "{code:?}");
@@ -290,8 +314,14 @@ mod tests {
             .collect();
         let out = tmp.path().join("out");
 
-        let err =
-            write_icons(&items, resolver([(icon_path, file)].into()), false, &out).unwrap_err();
+        let err = write_icons(
+            &items,
+            resolver([(icon_path, file)].into()),
+            false,
+            &out,
+            &|_, _| Ok(()),
+        )
+        .unwrap_err();
 
         assert!(err.to_string().contains("same file"), "{err}");
         assert!(!out.exists());
@@ -308,7 +338,7 @@ mod tests {
         .collect();
         let out = tmp.path().join("out");
 
-        write_icons(&items(), resolver(files), false, &out).unwrap();
+        write_icons(&items(), resolver(files), false, &out, &|_, _| Ok(())).unwrap();
 
         let ammo = image::open(out.join("Ammo.png")).unwrap().to_rgba8();
         assert!(ammo.pixels().all(|px| px == &image::Rgba([0, 0, 0, 255])));
@@ -322,7 +352,7 @@ mod tests {
             .collect();
         let out = tmp.path().join("out");
 
-        let stats = write_icons(&items(), resolver(files), true, &out).unwrap();
+        let stats = write_icons(&items(), resolver(files), true, &out, &|_, _| Ok(())).unwrap();
 
         assert_eq!(stats.written, 1);
         assert_eq!(stats.subicons_missing, 1);
@@ -345,7 +375,7 @@ mod tests {
         let pak_path = write_pak(tmp.path(), "a.pak", &["War/Content/Unrelated.uasset"]);
         let request = request(AssetSource::Pak(vec![pak_path]), tmp.path(), true);
 
-        let err = extract_icons(&request).unwrap_err();
+        let err = extract_icons(&request, &|_| Ok(())).unwrap_err();
 
         assert!(err.to_string().contains("none of the catalog's icons"));
     }
@@ -360,7 +390,12 @@ mod tests {
         );
         let request = request(AssetSource::Pak(vec![pak_path]), tmp.path(), false);
 
-        let stats = extract_icons(&request).unwrap();
+        let reports = std::cell::RefCell::new(Vec::new());
+        let stats = extract_icons(&request, &|update| {
+            reports.borrow_mut().push(update);
+            Ok(())
+        })
+        .unwrap();
 
         assert_eq!(
             stats,
@@ -371,5 +406,29 @@ mod tests {
                 subicons_missing: 0,
             }
         );
+        let reports = reports.into_inner();
+        let mut stages: Vec<Stage> = reports.iter().map(|r| r.stage).collect();
+        stages.dedup();
+        assert_eq!(stages, vec![Stage::ExtractingIcons, Stage::WritingIcons]);
+        let last = reports.last().unwrap();
+        assert_eq!((last.done, last.total), (3, 3));
+    }
+
+    #[test]
+    fn a_progress_error_stops_before_writing_icons() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pak_path = write_pak(tmp.path(), "a.pak", &[&format!("{RIFLE}.uasset")]);
+        let request = request(AssetSource::Pak(vec![pak_path]), tmp.path(), false);
+
+        let err = extract_icons(&request, &|update| match update.stage {
+            Stage::WritingIcons => Err(anyhow::anyhow!("interrupted")),
+            _ => Ok(()),
+        })
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "interrupted");
+        assert!(std::fs::read_dir(&request.output)
+            .map(|dir| dir.count() == 0)
+            .unwrap_or(true));
     }
 }

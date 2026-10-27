@@ -162,19 +162,28 @@ fn write_json<T: serde::Serialize + ?Sized>(path: &Path, value: &T) -> PyResult<
 ///     pak: Path to the .pak archive.
 ///     output: Directory to extract into.
 ///     include: Only extract paths containing this substring.
+///     progress: Optional callable invoked as `progress(stage, done, total)`
+///         with stage "extracting", over the extracted files.
 ///
 /// Returns:
 ///     List of extracted file paths (relative to `output`).
 #[pyfunction]
-#[pyo3(signature = (pak, output, *, include=None))]
+#[pyo3(signature = (pak, output, *, include=None, progress=None))]
 fn unpak(
     py: Python<'_>,
     pak: PathBuf,
     output: PathBuf,
     include: Option<&str>,
+    progress: Option<Py<PyAny>>,
 ) -> PyResult<Vec<String>> {
-    py.detach(|| crate::pak::extract(&pak, include, &output))
-        .map_err(to_py_err)
+    let progress = PyProgress::new(progress);
+    let result = py.detach(|| {
+        crate::pak::extract_with_progress(&pak, include, &output, &|done, total| {
+            progress.report("extracting", done, total)
+        })
+    });
+    progress.finish()?;
+    result.map_err(to_py_err)
 }
 
 /// Convert a single .uasset to JSON.
@@ -437,21 +446,30 @@ fn modify_icon(
 ///     output: Path to write the .pak to.
 ///     mount_point: Mount point written into the pak header.
 ///     version: Pak version: one of "v8a", "v8b", "v11".
+///     progress: Optional callable invoked as `progress(stage, done, total)`
+///         with stage "packing", over the packed files.
 ///
 /// Returns:
 ///     List of packed file paths (relative to `input`).
 #[pyfunction]
-#[pyo3(signature = (input, output, *, mount_point="../../../", version="v8b"))]
+#[pyo3(signature = (input, output, *, mount_point="../../../", version="v8b", progress=None))]
 fn pack(
     py: Python<'_>,
     input: PathBuf,
     output: PathBuf,
     mount_point: &str,
     version: &str,
+    progress: Option<Py<PyAny>>,
 ) -> PyResult<Vec<String>> {
     let version = parse_pak_version(version)?;
-    py.detach(|| crate::pak::pack(&input, &output, mount_point, version))
-        .map_err(to_py_err)
+    let progress = PyProgress::new(progress);
+    let result = py.detach(|| {
+        crate::pak::pack_with_progress(&input, &output, mount_point, version, &|done, total| {
+            progress.report("packing", done, total)
+        })
+    });
+    progress.finish()?;
+    result.map_err(to_py_err)
 }
 
 /// Decode a `.locres` file into an editable JSON translation file (see the
@@ -508,14 +526,27 @@ fn locres_pack(py: Python<'_>, input: PathBuf, output: PathBuf) -> PyResult<()> 
 /// Args:
 ///     pattern: Literal text to search for.
 ///     content_dir: Directory to recursively search.
+///     progress: Optional callable invoked as `progress(stage, done, total)`
+///         with stage "searching", over the searched files.
 ///
 /// Returns:
 ///     List of dicts with `path` and `encoding` ("ascii" or "utf16le").
 #[pyfunction]
-fn grep_strings(py: Python<'_>, pattern: &str, content_dir: PathBuf) -> PyResult<Py<PyAny>> {
-    let matches = py
-        .detach(|| grep::search_content_dir(&content_dir, pattern))
-        .map_err(to_py_err)?;
+#[pyo3(signature = (pattern, content_dir, *, progress=None))]
+fn grep_strings(
+    py: Python<'_>,
+    pattern: &str,
+    content_dir: PathBuf,
+    progress: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    let progress = PyProgress::new(progress);
+    let result = py.detach(|| {
+        grep::search_content_dir_with_progress(&content_dir, pattern, &|done, total| {
+            progress.report("searching", done, total)
+        })
+    });
+    progress.finish()?;
+    let matches = result.map_err(to_py_err)?;
     let matches_json: Vec<serde_json::Value> = matches
         .iter()
         .map(|m| {
@@ -545,6 +576,9 @@ fn grep_strings(py: Python<'_>, pattern: &str, content_dir: PathBuf) -> PyResult
 ///         used for the subtype icons the source doesn't itself provide.
 ///     vanilla_pak: The base game's `.pak`, read directly, as the same
 ///         fallback as `vanilla_extract_dir`.
+///     progress: Optional callable invoked as `progress(stage, done, total)`
+///         with stage "extracting_icons", "extracting_vanilla_icons" or
+///         "writing_icons".
 ///
 /// Returns:
 ///     Dict with `written`, `icons_missing`, `decode_errors` and
@@ -553,7 +587,7 @@ fn grep_strings(py: Python<'_>, pattern: &str, content_dir: PathBuf) -> PyResult
 #[pyfunction]
 #[pyo3(signature = (
     extract_dir=None, *, catalog, output, pak=None, subicons=true,
-    vanilla_extract_dir=None, vanilla_pak=None,
+    vanilla_extract_dir=None, vanilla_pak=None, progress=None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn extract_icons(
@@ -565,6 +599,7 @@ fn extract_icons(
     subicons: bool,
     vanilla_extract_dir: Option<PathBuf>,
     vanilla_pak: Option<PathBuf>,
+    progress: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let paks = pak.map(PakPaths::into_paths).unwrap_or_default();
     let source = asset_source("extract_dir", extract_dir, "pak", paks)?
@@ -581,9 +616,14 @@ fn extract_icons(
         output,
         subicons,
     };
-    let stats = py
-        .detach(|| crate::add_mod::extract_icons(&request))
-        .map_err(to_py_err)?;
+    let progress = PyProgress::new(progress);
+    let result = py.detach(|| {
+        crate::add_mod::extract_icons(&request, &|update: Progress| {
+            progress.report(update.stage.as_str(), update.done, update.total)
+        })
+    });
+    progress.finish()?;
+    let stats = result.map_err(to_py_err)?;
     let result = PyDict::new(py);
     result.set_item("written", stats.written)?;
     result.set_item("icons_missing", stats.icons_missing)?;
