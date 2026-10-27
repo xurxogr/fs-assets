@@ -48,13 +48,19 @@ pub struct CatalogStats {
 /// Recursively collects every `*.uasset` file under `dir`, excluding any
 /// whose file stem contains one of `EXCLUDE_PATTERNS` (substring match).
 /// Used for each `SEARCH_DIRECTORIES` entry. Returns an empty list (rather
-/// than erroring) if `dir` doesn't exist.
-pub fn collect_blueprint_files(dir: &Path) -> Vec<PathBuf> {
+/// than erroring) if `dir` doesn't exist, but fails on a directory under it
+/// that can't be read: skipping it would silently drop its items from the
+/// catalog.
+pub fn collect_blueprint_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
     // `walkdir` doesn't follow symlinks (so a link back up the tree can't
     // loop) and walks without recursing.
     let mut results: Vec<PathBuf> = walkdir::WalkDir::new(dir)
         .into_iter()
-        .flatten()
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
         .filter(|entry| entry.file_type().is_file())
         .map(walkdir::DirEntry::into_path)
         .filter(|path| {
@@ -68,7 +74,7 @@ pub fn collect_blueprint_files(dir: &Path) -> Vec<PathBuf> {
         })
         .collect();
     results.sort();
-    results
+    Ok(results)
 }
 
 /// Build the complete catalog from a real extraction directory (e.g. the
@@ -274,7 +280,7 @@ pub fn build_catalog_from_extract_dir_with_progress(
 
     let mut files = Vec::new();
     for search_dir in SEARCH_DIRECTORIES {
-        files.extend(collect_blueprint_files(&blueprints_dir.join(search_dir)));
+        files.extend(collect_blueprint_files(&blueprints_dir.join(search_dir))?);
     }
 
     let mut stats = CatalogStats {
@@ -371,7 +377,7 @@ mod tests {
             touch(&tmp.path().join("Sub/Pistol.uasset"));
             touch(&tmp.path().join("Sub/notes.txt"));
 
-            let mut files = collect_blueprint_files(tmp.path());
+            let mut files = collect_blueprint_files(tmp.path()).unwrap();
             files.sort();
             assert_eq!(files.len(), 2);
             assert!(files.iter().any(|p| p.ends_with("Rifle.uasset")));
@@ -387,7 +393,7 @@ mod tests {
             touch(&tmp.path().join("BPDestroyedWall.uasset"));
             touch(&tmp.path().join("BPRifle.uasset"));
 
-            let files = collect_blueprint_files(tmp.path());
+            let files = collect_blueprint_files(tmp.path()).unwrap();
             assert_eq!(files.len(), 1);
             assert!(files[0].ends_with("BPRifle.uasset"));
         }
@@ -399,7 +405,7 @@ mod tests {
             touch(&tmp.path().join("Sub/Rifle.uasset"));
             std::os::unix::fs::symlink(tmp.path(), tmp.path().join("Sub/loop")).unwrap();
 
-            let files = collect_blueprint_files(tmp.path());
+            let files = collect_blueprint_files(tmp.path()).unwrap();
             assert_eq!(files, vec![tmp.path().join("Sub/Rifle.uasset")]);
         }
 
@@ -407,7 +413,26 @@ mod tests {
         fn missing_directory_returns_empty() {
             let tmp = tempfile::tempdir().unwrap();
             let missing = tmp.path().join("DoesNotExist");
-            assert_eq!(collect_blueprint_files(&missing), Vec::<PathBuf>::new());
+            assert_eq!(
+                collect_blueprint_files(&missing).unwrap(),
+                Vec::<PathBuf>::new()
+            );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn fails_on_a_subdirectory_it_cannot_read() {
+            use std::os::unix::fs::PermissionsExt;
+
+            let tmp = tempfile::tempdir().unwrap();
+            touch(&tmp.path().join("Rifle.uasset"));
+            let locked = tmp.path().join("Locked");
+            touch(&locked.join("Pistol.uasset"));
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+
+            let result = collect_blueprint_files(tmp.path());
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(result.is_err());
         }
     }
 
