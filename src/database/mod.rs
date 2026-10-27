@@ -11,7 +11,7 @@
 //! holds pure, fully-testable logic (catalog-entry -> template metadata
 //! derivation, resize, phash); [`hdf5_writer`] is the thin real-HDF5-I/O
 //! layer; [`pipeline`] is the filesystem-backed integration layer wiring
-//! both together into the `build-db` CLI command.
+//! both together into the `add-mod` CLI command.
 
 pub mod hdf5_writer;
 pub mod pillow_resample;

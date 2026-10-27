@@ -40,7 +40,7 @@ use crate::database::{
     self, hdf5_writer, CatalogIconItem, IconTemplate, ItemCategory, ItemFaction,
 };
 
-/// Statistics for a single `build-db` run, mirroring the shape of
+/// Statistics for a single `add-mod` run, mirroring the shape of
 /// `crate::catalog::pipeline::CatalogStats` for consistency with the
 /// existing high-level command's reporting style.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -165,7 +165,7 @@ where
     let decoded = resolve_icon(path).and_then(|resolved| match decode_icon(&resolved) {
         Ok(img) => Some(Rc::new(img)),
         Err(e) => {
-            eprintln!("build-db: {e}");
+            eprintln!("add-mod: {e}");
             None
         }
     });
@@ -231,7 +231,7 @@ where
         let image = match decode_icon(&path) {
             Ok(img) => img,
             Err(e) => {
-                eprintln!("build-db: {e}");
+                eprintln!("add-mod: {e}");
                 stats.decode_errors += 1;
                 continue;
             }
