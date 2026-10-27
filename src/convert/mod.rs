@@ -804,12 +804,11 @@ fn expected_block_payload_len(format: CompressedPixelFormat, width: i32, height:
 /// `Read + Seek` plumbing across `uasset_to_png`'s public boundary) --
 /// negligible extra cost for icon-sized files, and consistent with
 /// `uasset_to_png`'s existing best-effort re-parse for the embedded-PNG
-/// path above it.
-fn find_texture2d_export_range(path: &Path) -> Option<(usize, usize)> {
-    let attempt_path = path.to_path_buf();
+/// path above it. It parses the `bytes` the caller already read, not the
+/// file again.
+fn find_texture2d_export_range(bytes: &[u8]) -> Option<(usize, usize)> {
     let result = catch_unwind_quietly(move || {
-        let file = BufReader::new(File::open(&attempt_path).ok()?);
-        Asset::new(file, None, ENGINE_VERSION).ok()
+        Asset::new(std::io::Cursor::new(bytes), None, ENGINE_VERSION).ok()
     });
     let asset = result.ok().flatten()?;
 
@@ -857,10 +856,8 @@ fn find_texture2d_export_range(path: &Path) -> Option<(usize, usize)> {
 /// extra per-mip or per-platform-data field (streaming/VT-related) that
 /// only appears for some textures, but that's speculation, not something
 /// verified against bytes.
-fn decode_compressed_mip0(path: &Path) -> anyhow::Result<image::RgbaImage> {
-    let bytes = std::fs::read(path)?;
-
-    let (range_start, range_end) = find_texture2d_export_range(path).ok_or_else(|| {
+fn decode_compressed_mip0(path: &Path, bytes: &[u8]) -> anyhow::Result<image::RgbaImage> {
+    let (range_start, range_end) = find_texture2d_export_range(bytes).ok_or_else(|| {
         anyhow::anyhow!(
             "couldn't find a Texture2D export (with a resolvable serial_offset/serial_size) via \
              unreal_asset's export table in {}",
@@ -868,7 +865,7 @@ fn decode_compressed_mip0(path: &Path) -> anyhow::Result<image::RgbaImage> {
         )
     })?;
 
-    let header = find_texture_header(&bytes, range_start, range_end).ok_or_else(|| {
+    let header = find_texture_header(bytes, range_start, range_end).ok_or_else(|| {
         anyhow::anyhow!(
             "no recognized cooked PixelFormat field (PF_DXT1/PF_DXT5/PF_BC5/PF_BC7/PF_B8G8R8A8) \
              found in the Texture2D export's own byte range [{range_start}, {range_end}) of {}",
@@ -876,7 +873,7 @@ fn decode_compressed_mip0(path: &Path) -> anyhow::Result<image::RgbaImage> {
         )
     })?;
 
-    let mip0 = parse_mip0_header(&bytes, header.mip0_header_offset).ok_or_else(|| {
+    let mip0 = parse_mip0_header(bytes, header.mip0_header_offset).ok_or_else(|| {
         anyhow::anyhow!(
             "{}: mip[0] bulk-data header ran past end of file",
             path.display()
@@ -899,7 +896,7 @@ fn decode_compressed_mip0(path: &Path) -> anyhow::Result<image::RgbaImage> {
         );
     }
 
-    let bulk_data_start_offset = parse_bulk_data_start_offset(&bytes).ok_or_else(|| {
+    let bulk_data_start_offset = parse_bulk_data_start_offset(bytes).ok_or_else(|| {
         anyhow::anyhow!(
             "{}: couldn't parse FPackageFileSummary far enough to read BulkDataStartOffset",
             path.display()
@@ -1093,7 +1090,7 @@ pub fn uasset_to_image(path: &Path) -> anyhow::Result<image::DynamicImage> {
     // FTexturePlatformData mip chain and decoding its BC/DXT blocks. See
     // decode_compressed_mip0's doc comment for exactly which fixtures this
     // is confirmed to work on.
-    decode_compressed_mip0(path)
+    decode_compressed_mip0(path, &file_bytes)
         .map(image::DynamicImage::ImageRgba8)
         .map_err(|e| {
             anyhow::anyhow!(
