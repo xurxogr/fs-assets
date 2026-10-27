@@ -45,35 +45,58 @@ use crate::database::{IconTemplate, ItemCategory, ItemFaction};
 /// Stored as `int64`.
 pub const DATABASE_VERSION: i64 = 2;
 
-fn vlen(s: &str) -> VarLenUnicode {
-    VarLenUnicode::from_str(s).expect("VarLenUnicode::from_str is infallible for any &str")
+/// `s` as an HDF5 variable-length string. Fails for a string holding `\0`,
+/// which HDF5 strings can't store (a code or mod name from a catalog or a
+/// caller could).
+fn vlen(s: &str) -> anyhow::Result<VarLenUnicode> {
+    VarLenUnicode::from_str(s)
+        .map_err(|e| anyhow::anyhow!("{s:?} can't be stored as an HDF5 string: {e}"))
 }
 
 /// Writes a full template database (one group per resolution) to `output_path`,
 /// overwriting any existing file. `resolutions` maps a resolution height
 /// (e.g. `1080`) to the list of templates generated for it; an empty list
 /// still produces a (metadata-only) group.
+///
+/// The database is written to a temporary file next to `output_path` and
+/// renamed over it only once complete, so a failure partway through leaves
+/// any existing database untouched.
 pub fn write_database(
     resolutions: &BTreeMap<i32, Vec<IconTemplate>>,
     output_path: &Path,
 ) -> anyhow::Result<()> {
-    if let Some(parent) = output_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
+    let parent = match output_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    std::fs::create_dir_all(parent)?;
 
-    let file = hdf5::File::create(output_path)?;
+    let temp_path = tempfile::Builder::new()
+        .suffix(".h5.tmp")
+        .tempfile_in(parent)?
+        .into_temp_path();
+    let file = hdf5::File::create(&temp_path)?;
+    write_file(&file, resolutions)?;
+    file.close()?;
+    temp_path.persist(output_path)?;
+    Ok(())
+}
 
+fn write_file(
+    file: &hdf5::File,
+    resolutions: &BTreeMap<i32, Vec<IconTemplate>>,
+) -> anyhow::Result<()> {
     file.new_attr::<i64>()
         .create("version")?
         .write_scalar(&DATABASE_VERSION)?;
     file.new_attr::<VarLenUnicode>()
         .create("format")?
-        .write_scalar(&vlen("hdf5"))?;
+        .write_scalar(&vlen("hdf5")?)?;
 
-    let resolution_strs: Vec<VarLenUnicode> =
-        resolutions.keys().map(|r| vlen(&r.to_string())).collect();
+    let resolution_strs = resolutions
+        .keys()
+        .map(|r| vlen(&r.to_string()))
+        .collect::<anyhow::Result<Vec<_>>>()?;
     if !resolution_strs.is_empty() {
         file.new_attr::<VarLenUnicode>()
             .shape(resolution_strs.len())
@@ -226,7 +249,7 @@ fn write_group(
         group
             .new_attr::<VarLenUnicode>()
             .create("resolution")?
-            .write_scalar(&vlen(&resolution.to_string()))?;
+            .write_scalar(&vlen(&resolution.to_string())?)?;
         group
             .new_attr::<i64>()
             .create("template_count")?
@@ -242,7 +265,7 @@ fn write_group(
         group
             .new_attr::<VarLenUnicode>()
             .create("format")?
-            .write_scalar(&vlen("hdf5"))?;
+            .write_scalar(&vlen("hdf5")?)?;
         return Ok(());
     }
 
@@ -258,8 +281,8 @@ fn write_group(
 
     for template in templates {
         images.extend_from_slice(&template.image);
-        codes.push(vlen(&template.code));
-        mods.push(vlen(&template.mod_name));
+        codes.push(vlen(&template.code)?);
+        mods.push(vlen(&template.mod_name)?);
         crated.push(template.crated);
         faction.push(template.faction.as_index());
         category.push(template.category.as_index());
@@ -306,7 +329,7 @@ fn write_group(
     group
         .new_attr::<VarLenUnicode>()
         .create("resolution")?
-        .write_scalar(&vlen(&resolution.to_string()))?;
+        .write_scalar(&vlen(&resolution.to_string())?)?;
     group
         .new_attr::<i64>()
         .create("template_count")?
@@ -322,7 +345,7 @@ fn write_group(
     group
         .new_attr::<VarLenUnicode>()
         .create("format")?
-        .write_scalar(&vlen("hdf5"))?;
+        .write_scalar(&vlen("hdf5")?)?;
 
     Ok(())
 }
@@ -365,6 +388,31 @@ mod tests {
         );
         resolutions.insert(1440, vec![sample_from("Rifle", "vanilla", 1440)]);
         write_database(&resolutions, output).unwrap();
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_existing_database_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("db.h5");
+        write_two_mod_database(&path);
+        let before = read_database(&path).unwrap();
+
+        let mut bad: BTreeMap<i32, Vec<IconTemplate>> = BTreeMap::new();
+        bad.insert(1080, vec![sample_from("Rifle\0", "vanilla", 1080)]);
+        let err = write_database(&bad, &path).unwrap_err();
+        assert!(err.to_string().contains("HDF5 string"), "{err}");
+
+        let after = read_database(&path).unwrap();
+        assert_eq!(after.len(), before.len());
+        for (resolution, templates) in &before {
+            let codes = |t: &[IconTemplate]| t.iter().map(|t| t.code.clone()).collect::<Vec<_>>();
+            assert_eq!(codes(&after[resolution]), codes(templates));
+        }
+        let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(leftovers, vec![std::ffi::OsString::from("db.h5")]);
     }
 
     #[test]
