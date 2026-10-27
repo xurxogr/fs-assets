@@ -408,6 +408,21 @@ struct TextureHeader {
 /// 8192x8192, instead of 1.25 GiB at the engine's absolute 16384 limit).
 const MAX_TEXTURE_DIMENSION: i32 = 8192;
 
+/// Decodes a PNG from an untrusted file. `image`'s default limits cap the
+/// allocation but not the dimensions, so a tiny deflate bomb still decodes
+/// to hundreds of MiB; this applies the same side cap as cooked textures,
+/// with only enough memory for one 8-bit RGBA image that size.
+pub fn decode_png(reader: impl std::io::BufRead + Seek) -> image::ImageResult<image::DynamicImage> {
+    let side = MAX_TEXTURE_DIMENSION as u32;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(side);
+    limits.max_image_height = Some(side);
+    limits.max_alloc = Some(u64::from(side) * u64::from(side) * 4);
+    let mut reader = image::ImageReader::with_format(reader, image::ImageFormat::Png);
+    reader.limits(limits);
+    reader.decode()
+}
+
 /// Byte-scans `bytes[range_start..range_end]` -- the specific `Texture2D`
 /// export's own serialized byte range, per `unreal_asset`'s export table
 /// (`BaseExport::serial_offset`/`serial_size`), NOT the whole file -- for a
@@ -1065,9 +1080,9 @@ pub fn uasset_to_image(path: &Path) -> anyhow::Result<image::DynamicImage> {
         // Decoded (rather than the embedded bytes passed through untouched)
         // so a corrupt/truncated embedded blob is caught here instead of
         // silently handed to the caller.
-        return image::load_from_memory_with_format(png_bytes, image::ImageFormat::Png).map_err(
-            |e| anyhow::anyhow!("embedded PNG in {} failed to decode: {e}", path.display()),
-        );
+        return decode_png(std::io::Cursor::new(png_bytes)).map_err(|e| {
+            anyhow::anyhow!("embedded PNG in {} failed to decode: {e}", path.display())
+        });
     }
 
     // No embedded FObjectThumbnail PNG (i.e. this is a real cooked asset, not
@@ -1158,6 +1173,22 @@ mod tests {
         bytes.extend_from_slice(&1i32.to_le_bytes()); // Mips.Num()
         bytes.resize(bytes.len() + 36, 0);
         bytes
+    }
+
+    fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::new(width, height)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        bytes.into_inner()
+    }
+
+    #[test]
+    fn decode_png_caps_the_image_size() {
+        let side = MAX_TEXTURE_DIMENSION as u32;
+        assert!(decode_png(std::io::Cursor::new(png_bytes(16, 16))).is_ok());
+        assert!(decode_png(std::io::Cursor::new(png_bytes(side + 1, 1))).is_err());
+        assert!(decode_png(std::io::Cursor::new(png_bytes(1, side + 1))).is_err());
     }
 
     #[test]

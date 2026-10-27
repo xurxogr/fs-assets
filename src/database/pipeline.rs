@@ -122,7 +122,9 @@ pub fn decode_icon(path: &Path) -> anyhow::Result<image::DynamicImage> {
         .and_then(|ext| ext.to_str())
         .map(str::to_ascii_lowercase);
     match extension.as_deref() {
-        Some("png") => image::open(path)
+        Some("png") => std::fs::File::open(path)
+            .map_err(image::ImageError::IoError)
+            .and_then(|file| crate::convert::decode_png(std::io::BufReader::new(file)))
             .map_err(|e| anyhow::anyhow!("failed to read icon {}: {e}", path.display())),
         Some("uasset") => decode_uasset_icon(path),
         _ => anyhow::bail!(
