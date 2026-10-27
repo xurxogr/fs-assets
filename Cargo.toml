@@ -49,8 +49,9 @@ clap = { version = "4", features = ["derive"] }
 # from the pak's own headers (index size, entry counts, LZ4 lengths) and
 # panics on bad UTF-16 names, so an untrusted mod pak could abort the
 # process; the fork bounds those reads by the real data (see its commit
-# 87c36e4).
-repak = { git = "https://github.com/xurxogr/repak", rev = "87c36e426514f1414996ec938da023489185be0d" }
+# 87c36e4) and moves to zstd 0.14.3 for the RustSec decompression advisories
+# (commit 4c08090).
+repak = { git = "https://github.com/xurxogr/repak", rev = "4c0809080080472b666db489adfc4671e493ac43" }
 # Recursive directory walk for `pack`'s "directory -> .pak" input traversal.
 walkdir = "2"
 # Pure-Rust BC1/BC3/BC5/BC7 (DXT1/DXT5/BC5/BC7) block decoder for real cooked
