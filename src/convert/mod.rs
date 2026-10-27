@@ -1,6 +1,6 @@
 use std::cell::Cell;
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Read, Seek};
 use std::panic::UnwindSafe;
 use std::path::Path;
 use std::sync::Once;
@@ -180,32 +180,31 @@ fn catch_unwind_quietly<R>(f: impl FnOnce() -> R + UnwindSafe) -> std::thread::R
     std::panic::catch_unwind(f)
 }
 
-/// Parses `path` under the single engine version all Foxhole assets use.
-/// `catch_unwind` remains as a defensive backstop against future crate
-/// bugs, but with the vendored patch applied (see Cargo.toml) this should
-/// no longer be hit for any real asset.
-pub fn uasset_to_json(path: &Path) -> anyhow::Result<Value> {
-    let attempt_path = path.to_path_buf();
-    let result = catch_unwind_quietly(move || {
-        let file = BufReader::new(File::open(&attempt_path)?);
-        Asset::new(file, None, ENGINE_VERSION)
-    });
-
-    match result {
-        Ok(Ok(asset)) => {
-            for export in &asset.asset_data.exports {
-                if let Some(normal) = export.get_normal_export() {
-                    let name = normal.base_export.object_name.get_content();
-                    if name.starts_with("Default__") {
-                        return Ok(properties_to_map(&normal.properties));
-                    }
-                }
-            }
-            anyhow::bail!("no Default__ export found in {}", path.display());
-        }
+/// Parses the asset `reader` holds (read from `path`, named in errors) under
+/// the single engine version all Foxhole assets use. `catch_unwind` remains
+/// as a defensive backstop against future crate bugs, but with the vendored
+/// patch applied (see Cargo.toml) this should no longer be hit for any real
+/// asset.
+fn parse_asset<C: Read + Seek + UnwindSafe>(reader: C, path: &Path) -> anyhow::Result<Asset<C>> {
+    match catch_unwind_quietly(move || Asset::new(reader, None, ENGINE_VERSION)) {
+        Ok(Ok(asset)) => Ok(asset),
         Ok(Err(e)) => Err(anyhow::anyhow!("{e}")),
         Err(_) => Err(anyhow::anyhow!("panicked while parsing {}", path.display())),
     }
+}
+
+/// The flat property map of `path`'s `Default__` export.
+pub fn uasset_to_json(path: &Path) -> anyhow::Result<Value> {
+    let asset = parse_asset(BufReader::new(File::open(path)?), path)?;
+    for export in &asset.asset_data.exports {
+        if let Some(normal) = export.get_normal_export() {
+            let name = normal.base_export.object_name.get_content();
+            if name.starts_with("Default__") {
+                return Ok(properties_to_map(&normal.properties));
+            }
+        }
+    }
+    anyhow::bail!("no Default__ export found in {}", path.display());
 }
 
 /// Raw signed `PackageIndex.index` as read from the crate: 0 = null,
@@ -226,42 +225,31 @@ fn package_index_to_i32(index: PackageIndex) -> i32 {
 /// representation needed by `blueprint_parser`, `data_table_lookup`,
 /// `damage_type_resolver`, and `catalog_assembler`.
 pub fn uasset_to_full_json(path: &Path) -> anyhow::Result<Value> {
-    let attempt_path = path.to_path_buf();
-    let result = catch_unwind_quietly(move || {
-        let file = BufReader::new(File::open(&attempt_path)?);
-        Asset::new(file, None, ENGINE_VERSION)
-    });
+    let asset = parse_asset(BufReader::new(File::open(path)?), path)?;
+    let imports: Vec<Value> = asset
+        .imports
+        .iter()
+        .map(|import| {
+            json!({
+                "object_name": fname_to_string(&import.object_name),
+                "class_name": fname_to_string(&import.class_name),
+                "class_package": fname_to_string(&import.class_package),
+                "outer_index": package_index_to_i32(import.outer_index),
+            })
+        })
+        .collect();
 
-    match result {
-        Ok(Ok(asset)) => {
-            let imports: Vec<Value> = asset
-                .imports
-                .iter()
-                .map(|import| {
-                    json!({
-                        "object_name": fname_to_string(&import.object_name),
-                        "class_name": fname_to_string(&import.class_name),
-                        "class_package": fname_to_string(&import.class_package),
-                        "outer_index": package_index_to_i32(import.outer_index),
-                    })
-                })
-                .collect();
+    let exports: Vec<Value> = asset
+        .asset_data
+        .exports
+        .iter()
+        .map(export_to_value)
+        .collect();
 
-            let exports: Vec<Value> = asset
-                .asset_data
-                .exports
-                .iter()
-                .map(export_to_value)
-                .collect();
-
-            Ok(json!({
-                "imports": imports,
-                "exports": exports,
-            }))
-        }
-        Ok(Err(e)) => Err(anyhow::anyhow!("{e}")),
-        Err(_) => Err(anyhow::anyhow!("panicked while parsing {}", path.display())),
-    }
+    Ok(json!({
+        "imports": imports,
+        "exports": exports,
+    }))
 }
 
 fn export_to_value(export: &Export) -> Value {
@@ -804,13 +792,10 @@ fn expected_block_payload_len(format: CompressedPixelFormat, width: i32, height:
 /// `Read + Seek` plumbing across `uasset_to_png`'s public boundary) --
 /// negligible extra cost for icon-sized files, and consistent with
 /// `uasset_to_png`'s existing best-effort re-parse for the embedded-PNG
-/// path above it. It parses the `bytes` the caller already read, not the
-/// file again.
-fn find_texture2d_export_range(bytes: &[u8]) -> Option<(usize, usize)> {
-    let result = catch_unwind_quietly(move || {
-        Asset::new(std::io::Cursor::new(bytes), None, ENGINE_VERSION).ok()
-    });
-    let asset = result.ok().flatten()?;
+/// path above it. It parses the `bytes` the caller already read from `path`,
+/// not the file again.
+fn find_texture2d_export_range(path: &Path, bytes: &[u8]) -> Option<(usize, usize)> {
+    let asset = parse_asset(std::io::Cursor::new(bytes), path).ok()?;
 
     for export in &asset.asset_data.exports {
         let base = export.get_base_export();
@@ -857,7 +842,7 @@ fn find_texture2d_export_range(bytes: &[u8]) -> Option<(usize, usize)> {
 /// only appears for some textures, but that's speculation, not something
 /// verified against bytes.
 fn decode_compressed_mip0(path: &Path, bytes: &[u8]) -> anyhow::Result<image::RgbaImage> {
-    let (range_start, range_end) = find_texture2d_export_range(bytes).ok_or_else(|| {
+    let (range_start, range_end) = find_texture2d_export_range(path, bytes).ok_or_else(|| {
         anyhow::anyhow!(
             "couldn't find a Texture2D export (with a resolvable serial_offset/serial_size) via \
              unreal_asset's export table in {}",
