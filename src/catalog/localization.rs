@@ -221,8 +221,10 @@ fn parse_locres_inner(filepath: &Path) -> io::Result<HashMap<String, String>> {
     let mut magic = [0u8; 16];
     f.read_exact(&mut magic)?;
     if magic != LOCRES_MAGIC {
-        // Legacy locres format not supported.
-        return Ok(HashMap::new());
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bad magic (legacy .locres format is not supported)",
+        ));
     }
 
     let version = read_u8(&mut f)?;
@@ -236,11 +238,14 @@ fn parse_locres_inner(filepath: &Path) -> io::Result<HashMap<String, String>> {
     read_namespace_strings(&mut f, version, &string_array)
 }
 
-/// Parse a UE4 `.locres` file. Any parse error (malformed file, truncated
-/// data) is swallowed and yields an empty map, so one bad locale file never
-/// aborts a catalog build.
+/// Parse a UE4 `.locres` file. A parse error (malformed or legacy file,
+/// truncated data) is reported on stderr and yields an empty map, so one bad
+/// locale file never aborts a catalog build but doesn't go unnoticed either.
 fn parse_locres(filepath: &Path) -> HashMap<String, String> {
-    parse_locres_inner(filepath).unwrap_or_default()
+    parse_locres_inner(filepath).unwrap_or_else(|e| {
+        eprintln!("build-catalog: failed to parse {}: {e}", filepath.display());
+        HashMap::new()
+    })
 }
 
 impl LocalizationLookup {
@@ -677,6 +682,19 @@ mod tests {
 
             let lookup = LocalizationLookup::new(tmp.path(), None);
             assert_eq!(lookup.get("SOMEGUID", Some("en")), None);
+        }
+
+        #[test]
+        fn legacy_and_truncated_files_are_parse_errors_not_empty_maps() {
+            let tmp = tempfile::tempdir().unwrap();
+            let legacy = tmp.path().join("legacy.locres");
+            fs::write(&legacy, b"WRONG_MAGIC_BYTES").unwrap();
+            let err = parse_locres_inner(&legacy).unwrap_err();
+            assert!(err.to_string().contains("bad magic"), "{err}");
+
+            let truncated = tmp.path().join("truncated.locres");
+            fs::write(&truncated, LOCRES_MAGIC).unwrap();
+            assert!(parse_locres_inner(&truncated).is_err());
         }
 
         #[test]
