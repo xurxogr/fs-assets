@@ -1,7 +1,6 @@
 use std::ffi::OsString;
 use std::fmt;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -153,9 +152,9 @@ enum Commands {
         #[arg(long)]
         code: String,
         #[arg(long, value_enum)]
-        faction: FactionArg,
+        faction: database::ItemFaction,
         #[arg(long, value_enum)]
-        category: CategoryArg,
+        category: database::ItemCategory,
         #[arg(long)]
         crated: bool,
         #[arg(long, default_value = DEFAULT_MOD_NAME)]
@@ -211,7 +210,7 @@ enum Commands {
         /// Pak version. Must match (or be compatible with) the base game's
         /// pak; for Foxhole that's V8B.
         #[arg(long, value_enum, default_value = "v8b")]
-        version: PakVersionArg,
+        version: pak::PakVersion,
     },
     /// Search `.uasset`/`.uexp` files under a directory for a literal
     /// string, checking both ASCII and UTF-16LE encodings — for finding UI
@@ -229,75 +228,6 @@ enum Commands {
 enum ConvertFormat {
     Json,
     Png,
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-enum FactionArg {
-    Neutral,
-    Colonials,
-    Wardens,
-}
-
-impl From<FactionArg> for database::ItemFaction {
-    fn from(value: FactionArg) -> Self {
-        match value {
-            FactionArg::Neutral => database::ItemFaction::Neutral,
-            FactionArg::Colonials => database::ItemFaction::Colonials,
-            FactionArg::Wardens => database::ItemFaction::Wardens,
-        }
-    }
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-enum PakVersionArg {
-    V8a,
-    V8b,
-    V11,
-}
-
-impl From<PakVersionArg> for repak::Version {
-    fn from(value: PakVersionArg) -> Self {
-        match value {
-            PakVersionArg::V8a => repak::Version::V8A,
-            PakVersionArg::V8b => repak::Version::V8B,
-            PakVersionArg::V11 => repak::Version::V11,
-        }
-    }
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-enum CategoryArg {
-    Item,
-    Vehicle,
-    Shippable,
-    Invalid,
-}
-
-impl From<CategoryArg> for database::ItemCategory {
-    fn from(value: CategoryArg) -> Self {
-        match value {
-            CategoryArg::Item => database::ItemCategory::Item,
-            CategoryArg::Vehicle => database::ItemCategory::Vehicle,
-            CategoryArg::Shippable => database::ItemCategory::Shippable,
-            CategoryArg::Invalid => database::ItemCategory::Invalid,
-        }
-    }
-}
-
-/// Picks the asset source from a mutually exclusive directory/pak pair of
-/// flags, the directory taking precedence (clap already rejects both).
-fn asset_source(extract_dir: Option<PathBuf>, paks: Vec<PathBuf>) -> Option<AssetSource> {
-    extract_dir
-        .map(AssetSource::ExtractDir)
-        .or_else(|| (!paks.is_empty()).then_some(AssetSource::Pak(paks)))
-}
-
-/// Writes `value` to `path` as pretty-printed JSON.
-fn write_json<T: serde::Serialize + ?Sized>(path: &Path, value: &T) -> anyhow::Result<()> {
-    let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
-    serde_json::to_writer_pretty(&mut file, value)?;
-    file.flush()?;
-    Ok(())
 }
 
 /// Prints an `add-mod` stage to stderr when it starts and when it ends.
@@ -470,7 +400,7 @@ fn run_command(command: Commands) -> anyhow::Result<()> {
             } else {
                 catalog::catalog_field_filter::filter_noise(&entries)
             };
-            write_json(&output, &entries)?;
+            crate::atomic_write::write_json(&output, &entries)?;
             println!(
                 "parsed {} stockpilable {} errors {} total_files {}",
                 stats.parsed, stats.stockpilable, stats.errors, stats.total_files
@@ -486,11 +416,16 @@ fn run_command(command: Commands) -> anyhow::Result<()> {
             vanilla_pak,
             resolution,
         } => {
-            let source = asset_source(extract_dir, pak)
-                .ok_or_else(|| anyhow::anyhow!("either --extract-dir or --pak is required"))?;
+            let source =
+                AssetSource::from_required_options("--extract-dir", extract_dir, "--pak", pak)?;
             let request = add_mod::AddModRequest {
                 source,
-                vanilla: asset_source(vanilla_extract_dir, vanilla_pak.into_iter().collect()),
+                vanilla: AssetSource::from_options(
+                    "--vanilla-extract-dir",
+                    vanilla_extract_dir,
+                    "--vanilla-pak",
+                    vanilla_pak.into_iter().collect(),
+                )?,
                 catalog,
                 db,
                 mod_name,
@@ -530,11 +465,16 @@ fn run_command(command: Commands) -> anyhow::Result<()> {
             vanilla_extract_dir,
             vanilla_pak,
         } => {
-            let source = asset_source(extract_dir, pak)
-                .ok_or_else(|| anyhow::anyhow!("either --extract-dir or --pak is required"))?;
+            let source =
+                AssetSource::from_required_options("--extract-dir", extract_dir, "--pak", pak)?;
             let request = add_mod::ExtractIconsRequest {
                 source,
-                vanilla: asset_source(vanilla_extract_dir, vanilla_pak.into_iter().collect()),
+                vanilla: AssetSource::from_options(
+                    "--vanilla-extract-dir",
+                    vanilla_extract_dir,
+                    "--vanilla-pak",
+                    vanilla_pak.into_iter().collect(),
+                )?,
                 catalog,
                 output,
                 subicons: !no_subicons,
@@ -564,8 +504,8 @@ fn run_command(command: Commands) -> anyhow::Result<()> {
 
             let identity = database::pipeline::IconIdentity {
                 code: code.clone(),
-                faction: faction.into(),
-                category: category.into(),
+                faction,
+                category,
                 crated,
                 mod_name,
             };
@@ -608,7 +548,7 @@ fn run_command(command: Commands) -> anyhow::Result<()> {
             reference,
         } => {
             let dumped = locres::dump(&input, reference.as_deref())?;
-            write_json(&output, &dumped)?;
+            crate::atomic_write::write_json(&output, &dumped)?;
             println!(
                 "dumped {} namespace(s) to {}",
                 dumped.namespaces.len(),
@@ -731,7 +671,7 @@ mod tests {
             panic!("expected add-mod");
         };
         assert_eq!(
-            asset_source(extract_dir, pak),
+            AssetSource::from_options("--extract-dir", extract_dir, "--pak", pak).unwrap(),
             Some(AssetSource::Pak(vec!["War.pak".into()]))
         );
         assert_eq!(vanilla_pak, Some(PathBuf::from("Vanilla.pak")));
@@ -756,7 +696,7 @@ mod tests {
             panic!("expected add-mod");
         };
         assert_eq!(
-            asset_source(extract_dir, pak),
+            AssetSource::from_options("--extract-dir", extract_dir, "--pak", pak).unwrap(),
             Some(AssetSource::Pak(vec!["a.pak".into(), "b.pak".into()]))
         );
     }
@@ -866,7 +806,13 @@ mod tests {
             panic!("expected build-catalog");
         };
         assert_eq!(
-            asset_source(extract_dir, pak.into_iter().collect()),
+            AssetSource::from_options(
+                "--extract-dir",
+                extract_dir,
+                "--pak",
+                pak.into_iter().collect()
+            )
+            .unwrap(),
             Some(AssetSource::Pak(vec!["War.pak".into()]))
         );
     }

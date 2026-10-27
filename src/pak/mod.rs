@@ -268,6 +268,25 @@ pub(crate) fn contained_path(output_dir: &Path, entry: &str) -> anyhow::Result<P
     Ok(dest)
 }
 
+/// The pak versions [`pack`] is offered with, by the name the CLI and the
+/// Python API take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum PakVersion {
+    V8a,
+    V8b,
+    V11,
+}
+
+impl From<PakVersion> for repak::Version {
+    fn from(value: PakVersion) -> Self {
+        match value {
+            PakVersion::V8a => repak::Version::V8A,
+            PakVersion::V8b => repak::Version::V8B,
+            PakVersion::V11 => repak::Version::V11,
+        }
+    }
+}
+
 /// Packs every file under `input_dir` into a new `.pak` at `output`. `mount_point` and `version` should match whatever pak
 /// this mod is meant to sit alongside — for Foxhole itself that's
 /// `"../../../"` and `Version::V8B`, the values of the game's own

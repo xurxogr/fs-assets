@@ -4,8 +4,7 @@
 //! `database.h5` etc.) exactly like the CLI does, and returns build
 //! statistics (or the raw conversion output) as native Python objects.
 
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -13,7 +12,6 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 
 use crate::add_mod::{AddModRequest, AssetSource, ExtractIconsRequest, Progress};
-use crate::database::{ItemCategory, ItemFaction};
 use crate::{catalog, convert, database, grep, locres};
 
 fn to_py_err(e: anyhow::Error) -> PyErr {
@@ -34,38 +32,20 @@ fn json_to_py(py: Python<'_>, value: &serde_json::Value) -> PyResult<Py<PyAny>> 
     Ok(result.unbind())
 }
 
-fn parse_faction(value: &str) -> PyResult<ItemFaction> {
-    match value.trim().to_lowercase().as_str() {
-        "neutral" => Ok(ItemFaction::Neutral),
-        "colonials" => Ok(ItemFaction::Colonials),
-        "wardens" => Ok(ItemFaction::Wardens),
-        other => Err(PyErr::new::<PyValueError, _>(format!(
-            "invalid faction '{other}': expected neutral, colonials, or wardens"
-        ))),
-    }
-}
-
-fn parse_category(value: &str) -> PyResult<ItemCategory> {
-    match value.trim().to_lowercase().as_str() {
-        "item" => Ok(ItemCategory::Item),
-        "vehicle" => Ok(ItemCategory::Vehicle),
-        "shippable" => Ok(ItemCategory::Shippable),
-        "invalid" => Ok(ItemCategory::Invalid),
-        other => Err(PyErr::new::<PyValueError, _>(format!(
-            "invalid category '{other}': expected item, vehicle, shippable, or invalid"
-        ))),
-    }
-}
-
-fn parse_pak_version(value: &str) -> PyResult<repak::Version> {
-    match value.trim().to_lowercase().as_str() {
-        "v8a" => Ok(repak::Version::V8A),
-        "v8b" => Ok(repak::Version::V8B),
-        "v11" => Ok(repak::Version::V11),
-        other => Err(PyErr::new::<PyValueError, _>(format!(
-            "invalid pak version '{other}': expected v8a, v8b, or v11"
-        ))),
-    }
+/// Parses `value` as one of `T`'s variants by the name the CLI takes,
+/// ignoring case and surrounding whitespace; `what` names it in the error.
+fn parse_choice<T: clap::ValueEnum>(what: &str, value: &str) -> PyResult<T> {
+    T::from_str(value.trim(), true).map_err(|_| {
+        let expected: Vec<String> = T::value_variants()
+            .iter()
+            .filter_map(|v| v.to_possible_value())
+            .map(|v| v.get_name().to_owned())
+            .collect();
+        PyErr::new::<PyValueError, _>(format!(
+            "invalid {what} '{value}': expected one of {}",
+            expected.join(", ")
+        ))
+    })
 }
 
 /// An optional Python `(stage, done, total)` progress callable, called from
@@ -133,27 +113,29 @@ impl PakPaths {
 
 /// Picks the asset source from a mutually exclusive directory/pak pair of
 /// keyword arguments, rejecting both being given at once.
+/// The source a directory argument named `dir_name` and a pak argument named
+/// `pak_name` pick, if any, as [`AssetSource::from_options`].
 fn asset_source(
     dir_name: &str,
     dir: Option<PathBuf>,
     pak_name: &str,
     paks: Vec<PathBuf>,
 ) -> PyResult<Option<AssetSource>> {
-    match (dir, paks.is_empty()) {
-        (Some(_), false) => Err(PyErr::new::<PyValueError, _>(format!(
-            "{dir_name} and {pak_name} are mutually exclusive"
-        ))),
-        (Some(dir), true) => Ok(Some(AssetSource::ExtractDir(dir))),
-        (None, false) => Ok(Some(AssetSource::Pak(paks))),
-        (None, true) => Ok(None),
-    }
+    AssetSource::from_options(dir_name, dir, pak_name, paks).map_err(value_err)
 }
 
-fn write_json<T: serde::Serialize + ?Sized>(path: &Path, value: &T) -> PyResult<()> {
-    let mut file = std::io::BufWriter::new(std::fs::File::create(path).map_err(io_err)?);
-    serde_json::to_writer_pretty(&mut file, value)
-        .map_err(|e| PyErr::new::<PyRuntimeError, _>(e.to_string()))?;
-    file.flush().map_err(io_err)
+/// Like [`asset_source`], for a source that is required.
+fn required_asset_source(
+    dir_name: &str,
+    dir: Option<PathBuf>,
+    pak_name: &str,
+    paks: Vec<PathBuf>,
+) -> PyResult<AssetSource> {
+    AssetSource::from_required_options(dir_name, dir, pak_name, paks).map_err(value_err)
+}
+
+fn value_err(e: anyhow::Error) -> PyErr {
+    PyErr::new::<PyValueError, _>(e.to_string())
 }
 
 /// Extract files from a .pak archive.
@@ -250,8 +232,7 @@ fn build_catalog(
     progress: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let paks = pak.into_iter().collect();
-    let source = asset_source("extract_dir", extract_dir, "pak", paks)?
-        .ok_or_else(|| PyErr::new::<PyValueError, _>("one of extract_dir or pak is required"))?;
+    let source = required_asset_source("extract_dir", extract_dir, "pak", paks)?;
     let progress = PyProgress::new(progress);
     let building = |done: usize, total: usize| progress.report("building_catalog", done, total);
     let result = py.detach(|| match &source {
@@ -274,7 +255,7 @@ fn build_catalog(
     } else {
         catalog::catalog_field_filter::filter_noise(&entries)
     };
-    write_json(&output, &entries)?;
+    crate::atomic_write::write_json(&output, &entries).map_err(to_py_err)?;
 
     let stats_json = serde_json::json!({
         "total_files": stats.total_files,
@@ -344,8 +325,7 @@ fn add_mod(
     progress: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let paks = pak.map(PakPaths::into_paths).unwrap_or_default();
-    let source = asset_source("extract_dir", extract_dir, "pak", paks)?
-        .ok_or_else(|| PyErr::new::<PyValueError, _>("one of extract_dir or pak is required"))?;
+    let source = required_asset_source("extract_dir", extract_dir, "pak", paks)?;
     let request = AddModRequest {
         source,
         vanilla: asset_source(
@@ -418,8 +398,8 @@ fn modify_icon(
 ) -> PyResult<()> {
     let identity = database::pipeline::IconIdentity {
         code: code.to_string(),
-        faction: parse_faction(faction)?,
-        category: parse_category(category)?,
+        faction: parse_choice("faction", faction)?,
+        category: parse_choice("category", category)?,
         crated,
         mod_name: mod_name.to_string(),
     };
@@ -461,12 +441,16 @@ fn pack(
     version: &str,
     progress: Option<Py<PyAny>>,
 ) -> PyResult<Vec<String>> {
-    let version = parse_pak_version(version)?;
+    let version: crate::pak::PakVersion = parse_choice("pak version", version)?;
     let progress = PyProgress::new(progress);
     let result = py.detach(|| {
-        crate::pak::pack_with_progress(&input, &output, mount_point, version, &|done, total| {
-            progress.report("packing", done, total)
-        })
+        crate::pak::pack_with_progress(
+            &input,
+            &output,
+            mount_point,
+            version.into(),
+            &|done, total| progress.report("packing", done, total),
+        )
     });
     progress.finish()?;
     result.map_err(to_py_err)
@@ -493,7 +477,7 @@ fn locres_dump(
 ) -> PyResult<Py<PyAny>> {
     let namespaces = py.detach(|| -> PyResult<usize> {
         let dumped = locres::dump(&input, reference.as_deref()).map_err(to_py_err)?;
-        write_json(&output, &dumped)?;
+        crate::atomic_write::write_json(&output, &dumped).map_err(to_py_err)?;
         Ok(dumped.namespaces.len())
     })?;
 
@@ -602,8 +586,7 @@ fn extract_icons(
     progress: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let paks = pak.map(PakPaths::into_paths).unwrap_or_default();
-    let source = asset_source("extract_dir", extract_dir, "pak", paks)?
-        .ok_or_else(|| PyErr::new::<PyValueError, _>("one of extract_dir or pak is required"))?;
+    let source = required_asset_source("extract_dir", extract_dir, "pak", paks)?;
     let request = ExtractIconsRequest {
         source,
         vanilla: asset_source(

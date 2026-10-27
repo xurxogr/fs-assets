@@ -41,6 +41,34 @@ pub enum AssetSource {
 }
 
 impl AssetSource {
+    /// The source picked by a directory option named `dir_name` and a pak
+    /// option named `pak_name`, which are mutually exclusive; `None` when
+    /// neither is given.
+    pub fn from_options(
+        dir_name: &str,
+        dir: Option<PathBuf>,
+        pak_name: &str,
+        paks: Vec<PathBuf>,
+    ) -> anyhow::Result<Option<Self>> {
+        match (dir, paks.is_empty()) {
+            (Some(_), false) => anyhow::bail!("{dir_name} and {pak_name} are mutually exclusive"),
+            (Some(dir), true) => Ok(Some(Self::ExtractDir(dir))),
+            (None, false) => Ok(Some(Self::Pak(paks))),
+            (None, true) => Ok(None),
+        }
+    }
+
+    /// Like [`AssetSource::from_options`], for a source that is required.
+    pub fn from_required_options(
+        dir_name: &str,
+        dir: Option<PathBuf>,
+        pak_name: &str,
+        paks: Vec<PathBuf>,
+    ) -> anyhow::Result<Self> {
+        Self::from_options(dir_name, dir, pak_name, paks)?
+            .ok_or_else(|| anyhow::anyhow!("one of {dir_name} or {pak_name} is required"))
+    }
+
     /// The directory this source's `icons` are read from: an extraction
     /// directory as is, or `dir` with the `icons` its paks contain extracted
     /// into it, reporting progress to `progress`. When `required`, paks that

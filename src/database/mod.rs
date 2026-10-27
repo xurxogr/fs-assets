@@ -27,7 +27,7 @@ use pillow_resample::{flatten_on_black_to_bgr, resize_lanczos_rgba};
 /// (`fs-ocr/src/enums/item_faction.rs`) **exactly**, including discriminant
 /// values — these are written to HDF5 as a `u8` index and must match on both
 /// the write (here) and read (`fs-ocr`) sides.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum ItemFaction {
     #[default]
     Neutral = 0,
@@ -76,7 +76,7 @@ impl ItemFaction {
 
 /// Item category classification, mirroring `fs-ocr`'s `ItemCategory` enum
 /// (`fs-ocr/src/enums/item_category.rs`) exactly, including discriminants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum ItemCategory {
     Item = 0,
     Vehicle = 1,
