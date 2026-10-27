@@ -864,37 +864,39 @@ fn find_texture2d_export_range(path: &Path, bytes: &[u8]) -> Option<(usize, usiz
 /// only appears for some textures, but that's speculation, not something
 /// verified against bytes.
 fn decode_compressed_mip0(path: &Path, bytes: &[u8]) -> anyhow::Result<image::RgbaImage> {
+    let (header, payload) = find_mip0(path, bytes)?;
+    decode_mip0(&header, payload)
+}
+
+/// Finds the Texture2D export's texture header and `mip[0]`'s pixel payload
+/// in `bytes`, the whole `path`, checking the payload has the size the
+/// header's format and dimensions call for. Errors leave `path` to the
+/// caller.
+fn find_mip0<'a>(path: &Path, bytes: &'a [u8]) -> anyhow::Result<(TextureHeader, &'a [u8])> {
     let (range_start, range_end) = find_texture2d_export_range(path, bytes).ok_or_else(|| {
         anyhow::anyhow!(
             "couldn't find a Texture2D export (with a resolvable serial_offset/serial_size) via \
-             unreal_asset's export table in {}",
-            path.display()
+             unreal_asset's export table"
         )
     })?;
 
     let header = find_texture_header(bytes, range_start, range_end).ok_or_else(|| {
         anyhow::anyhow!(
             "no recognized cooked PixelFormat field (PF_DXT1/PF_DXT5/PF_BC5/PF_BC7/PF_B8G8R8A8) \
-             found in the Texture2D export's own byte range [{range_start}, {range_end}) of {}",
-            path.display()
+             found in the Texture2D export's own byte range [{range_start}, {range_end})"
         )
     })?;
 
-    let mip0 = parse_mip0_header(bytes, header.mip0_header_offset).ok_or_else(|| {
-        anyhow::anyhow!(
-            "{}: mip[0] bulk-data header ran past end of file",
-            path.display()
-        )
-    })?;
+    let mip0 = parse_mip0_header(bytes, header.mip0_header_offset)
+        .ok_or_else(|| anyhow::anyhow!("mip[0] bulk-data header ran past end of file"))?;
 
     let expected_len =
         expected_block_payload_len(header.pixel_format, header.size_x, header.size_y);
     if mip0.size_on_disk as usize != expected_len {
         anyhow::bail!(
-            "{}: mip[0] SizeOnDisk ({}) doesn't match the expected {:?} block-compressed size \
+            "mip[0] SizeOnDisk ({}) doesn't match the expected {:?} block-compressed size \
              for {}x{} ({} bytes) -- this file's header layout likely differs from the 3 \
              confirmed fixtures (see decode_compressed_mip0 doc comment)",
-            path.display(),
             mip0.size_on_disk,
             header.pixel_format,
             header.size_x,
@@ -904,20 +906,16 @@ fn decode_compressed_mip0(path: &Path, bytes: &[u8]) -> anyhow::Result<image::Rg
     }
 
     let bulk_data_start_offset = parse_bulk_data_start_offset(bytes).ok_or_else(|| {
-        anyhow::anyhow!(
-            "{}: couldn't parse FPackageFileSummary far enough to read BulkDataStartOffset",
-            path.display()
-        )
+        anyhow::anyhow!("couldn't parse FPackageFileSummary far enough to read BulkDataStartOffset")
     })?;
 
     let (payload_start, payload_len) =
         locate_mip0_payload(&mip0, header.mip0_header_offset, bulk_data_start_offset).ok_or_else(
             || {
                 anyhow::anyhow!(
-                "{}: couldn't locate mip[0]'s pixel payload (OffsetInFile arithmetic overflowed \
-                 or produced a negative offset)",
-                path.display()
-            )
+                    "couldn't locate mip[0]'s pixel payload (OffsetInFile arithmetic overflowed \
+                     or produced a negative offset)"
+                )
             },
         )?;
     let payload_end = payload_start
@@ -925,15 +923,15 @@ fn decode_compressed_mip0(path: &Path, bytes: &[u8]) -> anyhow::Result<image::Rg
         .filter(|&end| end <= bytes.len())
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "{}: mip[0] payload [{}, +{}) runs past end of file ({} bytes)",
-                path.display(),
-                payload_start,
-                payload_len,
+                "mip[0] payload [{payload_start}, +{payload_len}) runs past end of file ({} bytes)",
                 bytes.len()
             )
         })?;
-    let payload = &bytes[payload_start..payload_end];
+    Ok((header, &bytes[payload_start..payload_end]))
+}
 
+/// Decodes `payload`, `mip[0]` as [`find_mip0`] found it, to RGBA8.
+fn decode_mip0(header: &TextureHeader, payload: &[u8]) -> anyhow::Result<image::RgbaImage> {
     let width = header.size_x as usize;
     let height = header.size_y as usize;
 
@@ -950,22 +948,15 @@ fn decode_compressed_mip0(path: &Path, bytes: &[u8]) -> anyhow::Result<image::Rg
         decode_blocks_into(header.pixel_format, payload, width, height, &mut rgba).map_err(
             |e| {
                 anyhow::anyhow!(
-                    "{}: texture2ddecoder failed to decode {:?} block data: {e}",
-                    path.display(),
+                    "texture2ddecoder failed to decode {:?} block data: {e}",
                     header.pixel_format
                 )
             },
         )?;
     }
 
-    image::RgbaImage::from_raw(width as u32, height as u32, rgba).ok_or_else(|| {
-        anyhow::anyhow!(
-            "{}: decoded pixel buffer size didn't match {}x{}",
-            path.display(),
-            width,
-            height
-        )
-    })
+    image::RgbaImage::from_raw(width as u32, height as u32, rgba)
+        .ok_or_else(|| anyhow::anyhow!("decoded pixel buffer size didn't match {width}x{height}"))
 }
 
 /// Decodes `payload`, a `width`x`height` mip of block-compressed `format`
