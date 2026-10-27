@@ -252,6 +252,22 @@ fn parse_locres(filepath: &Path) -> HashMap<String, String> {
     })
 }
 
+/// The paths of `dir`'s entries, reporting (and skipping) the directory or
+/// any entry that can't be read.
+fn read_dir_or_warn(dir: &Path) -> Vec<PathBuf> {
+    let warn = |e: io::Error| eprintln!("build-catalog: failed to read {}: {e}", dir.display());
+    match fs::read_dir(dir) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.map_err(warn).ok())
+            .map(|entry| entry.path())
+            .collect(),
+        Err(e) => {
+            warn(e);
+            Vec::new()
+        }
+    }
+}
+
 impl LocalizationLookup {
     /// Initialize the localization service.
     ///
@@ -282,29 +298,25 @@ impl LocalizationLookup {
             return;
         }
 
-        if let Ok(entries) = fs::read_dir(&self.localization_dir) {
-            for entry in entries.flatten() {
-                let loc_subdir = entry.path();
-                if !loc_subdir.is_dir() {
+        // Like a `.locres` that fails to parse, a directory that can't be
+        // read is reported and skipped: lookups can't fail, so the language
+        // just comes out without those strings.
+        for loc_subdir in read_dir_or_warn(&self.localization_dir) {
+            if !loc_subdir.is_dir() {
+                continue;
+            }
+
+            let lang_dir = loc_subdir.join(language);
+            if !lang_dir.exists() {
+                continue;
+            }
+
+            for path in read_dir_or_warn(&lang_dir) {
+                if path.extension().and_then(|e| e.to_str()) != Some("locres") {
                     continue;
                 }
 
-                let lang_dir = loc_subdir.join(language);
-                if !lang_dir.exists() {
-                    continue;
-                }
-
-                let Ok(lang_entries) = fs::read_dir(&lang_dir) else {
-                    continue;
-                };
-                for file_entry in lang_entries.flatten() {
-                    let path = file_entry.path();
-                    if path.extension().and_then(|e| e.to_str()) != Some("locres") {
-                        continue;
-                    }
-
-                    strings.extend(parse_locres(&path));
-                }
+                strings.extend(parse_locres(&path));
             }
         }
 
@@ -679,6 +691,31 @@ mod tests {
 
             let lookup = LocalizationLookup::new(tmp.path(), None);
             assert_eq!(lookup.get("GUID", Some("en")), Some("Hello".to_string()));
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn skips_an_unreadable_language_dir_and_loads_the_rest() {
+            use std::os::unix::fs::PermissionsExt;
+
+            let tmp = tempfile::tempdir().unwrap();
+            create_mock_locres(
+                &tmp.path().join("Foxhole-Content/en/game.locres"),
+                &[("GUID", "Hello")],
+            );
+            create_mock_locres(
+                &tmp.path().join("Locked-Content/en/other.locres"),
+                &[("OTHER", "Hidden")],
+            );
+            let locked = tmp.path().join("Locked-Content/en");
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+
+            let lookup = LocalizationLookup::new(tmp.path(), None);
+            let (found, hidden) = (lookup.get("GUID", None), lookup.get("OTHER", None));
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+            assert_eq!(found, Some("Hello".to_string()));
+            assert_eq!(hidden, None);
         }
 
         #[test]
