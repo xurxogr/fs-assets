@@ -1,6 +1,9 @@
+use std::cell::Cell;
 use std::fs::File;
 use std::io::BufReader;
+use std::panic::UnwindSafe;
 use std::path::Path;
+use std::sync::Once;
 
 use serde_json::{json, Map, Value};
 use unreal_asset::engine_version::EngineVersion;
@@ -143,20 +146,50 @@ fn properties_to_map(properties: &[Property]) -> Value {
     Value::Object(map)
 }
 
+thread_local! {
+    /// Set while this thread runs [`catch_unwind_quietly`]'s closure.
+    static QUIET_PANICS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// [`std::panic::catch_unwind`] that keeps a panic inside `f` from printing
+/// its message: `unreal_asset` panics on malformed assets, and those are
+/// reported as errors instead. The panic hook is replaced only once, by one
+/// that stays silent just for the thread inside `f` and defers to the
+/// previous hook everywhere else, so concurrent callers (the Python bindings
+/// allow them) never see each other's hook swaps, and a panic outside `f`
+/// still prints.
+fn catch_unwind_quietly<R>(f: impl FnOnce() -> R + UnwindSafe) -> std::thread::Result<R> {
+    static INSTALL_HOOK: Once = Once::new();
+    INSTALL_HOOK.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if !QUIET_PANICS.with(Cell::get) {
+                previous(info);
+            }
+        }));
+    });
+
+    /// Restores the thread's previous quiet flag, even when `f` unwinds.
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            QUIET_PANICS.with(|quiet| quiet.set(self.0));
+        }
+    }
+    let _restore = Restore(QUIET_PANICS.with(|quiet| quiet.replace(true)));
+    std::panic::catch_unwind(f)
+}
+
 /// Parses `path` under the single engine version all Foxhole assets use.
 /// `catch_unwind` remains as a defensive backstop against future crate
 /// bugs, but with the vendored patch applied (see Cargo.toml) this should
 /// no longer be hit for any real asset.
 pub fn uasset_to_json(path: &Path) -> anyhow::Result<Value> {
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-
     let attempt_path = path.to_path_buf();
-    let result = std::panic::catch_unwind(move || {
+    let result = catch_unwind_quietly(move || {
         let file = BufReader::new(File::open(&attempt_path)?);
         Asset::new(file, None, ENGINE_VERSION)
     });
-    std::panic::set_hook(prev_hook);
 
     match result {
         Ok(Ok(asset)) => {
@@ -193,15 +226,11 @@ fn package_index_to_i32(index: PackageIndex) -> i32 {
 /// representation needed by `blueprint_parser`, `data_table_lookup`,
 /// `damage_type_resolver`, and `catalog_assembler`.
 pub fn uasset_to_full_json(path: &Path) -> anyhow::Result<Value> {
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-
     let attempt_path = path.to_path_buf();
-    let result = std::panic::catch_unwind(move || {
+    let result = catch_unwind_quietly(move || {
         let file = BufReader::new(File::open(&attempt_path)?);
         Asset::new(file, None, ENGINE_VERSION)
     });
-    std::panic::set_hook(prev_hook);
 
     match result {
         Ok(Ok(asset)) => {
@@ -776,14 +805,11 @@ fn expected_block_payload_len(format: CompressedPixelFormat, width: i32, height:
 /// `uasset_to_png`'s existing best-effort re-parse for the embedded-PNG
 /// path above it.
 fn find_texture2d_export_range(path: &Path) -> Option<(usize, usize)> {
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
     let attempt_path = path.to_path_buf();
-    let result = std::panic::catch_unwind(move || {
+    let result = catch_unwind_quietly(move || {
         let file = BufReader::new(File::open(&attempt_path).ok()?);
         Asset::new(file, None, ENGINE_VERSION).ok()
     });
-    std::panic::set_hook(prev_hook);
     let asset = result.ok().flatten()?;
 
     for export in &asset.asset_data.exports {
@@ -1028,14 +1054,11 @@ pub fn uasset_to_png(path: &Path) -> anyhow::Result<Vec<u8>> {
     // section it doesn't understand runs it past EOF) yet still yields a
     // perfectly good embedded PNG once read this way — worth knowing if
     // this function's error path ever needs a stricter validation step.
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
     let attempt_path = path.to_path_buf();
-    let _ = std::panic::catch_unwind(move || {
+    let _ = catch_unwind_quietly(move || {
         let file = BufReader::new(File::open(&attempt_path)?);
         Asset::new(file, None, ENGINE_VERSION)
     });
-    std::panic::set_hook(prev_hook);
 
     let file_bytes = std::fs::read(path)?;
 
@@ -1103,6 +1126,23 @@ mod tests {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures")
             .join(name)
+    }
+
+    #[test]
+    fn catch_unwind_quietly_catches_and_scopes_the_silence_to_its_thread() {
+        let inner = catch_unwind_quietly(|| {
+            let other_thread = std::thread::spawn(|| QUIET_PANICS.with(Cell::get))
+                .join()
+                .unwrap();
+            (QUIET_PANICS.with(Cell::get), other_thread)
+        });
+        assert_eq!(inner.unwrap(), (true, false));
+
+        assert!(catch_unwind_quietly(|| panic!("malformed asset")).is_err());
+        assert!(
+            !QUIET_PANICS.with(Cell::get),
+            "flag left set after unwinding"
+        );
     }
 
     #[test]
