@@ -68,6 +68,17 @@ fs-assets modify-icon --db templates.h5 --code RifleW --faction wardens \
 
 Run `fs-assets <command> --help` for every option.
 
+### Untrusted files
+
+Mod paks, catalogs and `.locres` files from third parties are treated as
+untrusted: extraction refuses pak entries that would land outside the output
+directory, and malformed files fail with an error instead of exhausting
+memory. A template database (`.h5`) is different: it is parsed by the HDF5
+C library, which has a history of memory-safety bugs on crafted files. Only
+pass `--db` (or open with the Python API) databases you built yourself or got
+from a source you trust; to add a downloaded mod, add its `.pak` to your own
+database rather than using someone else's `.h5`.
+
 ### Translation workflow
 
 ```bash
