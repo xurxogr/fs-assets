@@ -9,8 +9,6 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
-
 /// Supported languages and their folder names.
 pub const SUPPORTED_LANGUAGES: &[(&str, &str)] = &[
     ("en", "English"),
@@ -188,14 +186,11 @@ impl LocalizationLookup {
         }
         result
     }
+}
 
-    /// Check if a value looks like a localization GUID (exactly 32 hex chars).
-    pub fn is_guid(&self, value: &Value) -> bool {
-        match value.as_str() {
-            Some(s) => s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit()),
-            None => false,
-        }
-    }
+/// Whether `text` looks like a localization GUID: exactly 32 hex digits.
+pub fn is_guid(text: &str) -> bool {
+    text.len() == 32 && text.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
@@ -394,22 +389,16 @@ mod tests {
 
         #[test]
         fn returns_true_for_valid_guid() {
-            let tmp = tempfile::tempdir().unwrap();
-            let lookup = LocalizationLookup::new(tmp.path(), None);
-            assert!(lookup.is_guid(&json!("8BB336F4459740A6ADA7B28B2D91748B")));
-            assert!(lookup.is_guid(&json!("abc123def456abc123def456abc12345")));
+            assert!(is_guid("8BB336F4459740A6ADA7B28B2D91748B"));
+            assert!(is_guid("abc123def456abc123def456abc12345"));
         }
 
         #[test]
         fn returns_false_for_non_guid() {
-            let tmp = tempfile::tempdir().unwrap();
-            let lookup = LocalizationLookup::new(tmp.path(), None);
-            assert!(!lookup.is_guid(&json!("ABC123")));
-            assert!(!lookup.is_guid(&json!("8BB336F4459740A6ADA7B28B2D91748B1")));
-            assert!(!lookup.is_guid(&json!("8BB336F4459740A6ADA7B28B2D91748G")));
-            assert!(!lookup.is_guid(&json!("Hello World")));
-            assert!(!lookup.is_guid(&json!(12345)));
-            assert!(!lookup.is_guid(&Value::Null));
+            assert!(!is_guid("ABC123"));
+            assert!(!is_guid("8BB336F4459740A6ADA7B28B2D91748B1"));
+            assert!(!is_guid("8BB336F4459740A6ADA7B28B2D91748G"));
+            assert!(!is_guid("Hello World"));
         }
     }
 

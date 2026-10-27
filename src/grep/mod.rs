@@ -14,7 +14,7 @@ use anyhow::Context;
 use memchr::memmem::Finder;
 
 /// Which on-disk `FString` encoding a match was found in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Encoding {
     /// Single-byte ASCII.
     Ascii,
@@ -100,24 +100,6 @@ pub fn search_content_dir_with_progress(
 
     matches.sort_by(|a, b| a.path.cmp(&b.path).then(a.encoding.cmp(&b.encoding)));
     Ok(matches)
-}
-
-impl PartialOrd for Encoding {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Encoding {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        fn rank(e: &Encoding) -> u8 {
-            match e {
-                Encoding::Ascii => 0,
-                Encoding::Utf16Le => 1,
-            }
-        }
-        rank(self).cmp(&rank(other))
-    }
 }
 
 /// Whether `haystack` contains `needle`'s needle; an empty needle never

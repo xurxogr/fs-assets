@@ -23,8 +23,10 @@ use serde_json::{json, Map, Value};
 
 use crate::catalog::blueprint_parser::{self, AssetLoader};
 use crate::catalog::data_table_lookup;
-use crate::catalog::localization::LocalizationLookup;
-use crate::catalog::utils::{extract_localized_text, is_truthy, normalize_object_path};
+use crate::catalog::localization::{self, LocalizationLookup};
+use crate::catalog::utils::{
+    extract_localized_text, is_truthy, normalize_object_path, value_to_display_string,
+};
 
 /// Determine the ammo code for resolving `DamageType`.
 ///
@@ -52,14 +54,14 @@ pub fn get_ammo_code(data: &Value, ammo_dynamic_data_asset: &Value) -> Option<St
     // Case 2: Single ammo type from MultiAmmo.
     if let Some(multi_ammo) = item_comp.get("MultiAmmo").and_then(Value::as_array) {
         if multi_ammo.len() == 1 {
-            return Some(py_str(&multi_ammo[0]));
+            return Some(value_to_display_string(&multi_ammo[0]));
         }
     }
 
     // Case 3: CompatibleAmmoCodeName (single ammo weapons).
     if let Some(compat_ammo) = item_comp.get("CompatibleAmmoCodeName") {
         if is_truthy(compat_ammo) {
-            return Some(py_str(compat_ammo));
+            return Some(value_to_display_string(compat_ammo));
         }
     }
 
@@ -67,7 +69,7 @@ pub fn get_ammo_code(data: &Value, ammo_dynamic_data_asset: &Value) -> Option<St
     if let Some(proj_class) = item_comp.get("ProjectileClass").and_then(Value::as_object) {
         if let Some(explosive) = proj_class.get("ExplosiveCodeName") {
             if is_truthy(explosive) {
-                return Some(py_str(explosive));
+                return Some(value_to_display_string(explosive));
             }
         }
     }
@@ -132,7 +134,7 @@ pub fn build_damage_type_result(
     if let Some(display_name) = dt_data.get("DisplayName") {
         if let Some(text) = extract_localized_text(display_name) {
             if !text.is_empty() {
-                if loc_service.is_guid(&json!(text)) {
+                if localization::is_guid(&text) {
                     resolved.insert(
                         "DisplayName".to_string(),
                         json!(loc_service.get_with_fallback(&text, None)),
@@ -157,13 +159,16 @@ pub fn build_damage_type_result(
                         let text_value = m.get("Text").cloned().unwrap_or(json!(""));
                         // Handle nested dict format {"Text": {"Text": "...", "Guid": "..."}}.
                         if let Value::Object(inner) = &text_value {
-                            let text = inner.get("Text").map(value_str).unwrap_or_default();
+                            let text = inner
+                                .get("Text")
+                                .map(value_to_display_string)
+                                .unwrap_or_default();
                             if let Some(guid) = inner.get("Guid").and_then(Value::as_str) {
                                 guids.push(guid.to_string());
                             }
                             text
                         } else if is_truthy(&text_value) {
-                            value_str(&text_value)
+                            value_to_display_string(&text_value)
                         } else {
                             String::new()
                         }
@@ -176,7 +181,7 @@ pub fn build_damage_type_result(
                     continue;
                 }
 
-                if loc_service.is_guid(&json!(text)) {
+                if localization::is_guid(&text) {
                     guids.push(text.clone());
                     texts.push(loc_service.get_with_fallback(&text, None));
                 } else {
@@ -308,35 +313,6 @@ pub fn resolve_damage_type(
     )?;
 
     Some(build_damage_type_result(&dt_data, &bp_path, loc_service))
-}
-
-/// String rendering of a scalar JSON value for already-truthy-checked
-/// values: strings as-is, booleans as `True`/`False`, null as `None`,
-/// numbers and everything else via their JSON form.
-fn py_str(value: &Value) -> String {
-    match value {
-        Value::String(s) => s.clone(),
-        Value::Bool(b) => {
-            if *b {
-                "True".to_string()
-            } else {
-                "False".to_string()
-            }
-        }
-        Value::Null => "None".to_string(),
-        Value::Number(n) => n.to_string(),
-        other => other.to_string(),
-    }
-}
-
-/// Same rendering as [`py_str`] but named for the "value_value" text-field
-/// extraction call sites, where the input isn't necessarily pre-checked for
-/// truthiness (empty string is a valid, falsy-but-representable result).
-fn value_str(value: &Value) -> String {
-    match value {
-        Value::String(s) => s.clone(),
-        other => py_str(other),
-    }
 }
 
 #[cfg(test)]

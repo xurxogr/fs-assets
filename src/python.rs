@@ -245,14 +245,12 @@ fn build_catalog(
         AssetSource::ExtractDir(dir) => {
             catalog::pipeline::build_catalog_from_extract_dir_with_progress(dir, &building)
         }
-        AssetSource::Pak(paks) => match paks.as_slice() {
-            [pak] => catalog::pipeline::build_catalog_from_pak_with_progress(
-                pak,
-                &|done, total| progress.report("extracting_catalog_inputs", done, total),
-                &building,
-            ),
-            _ => Err(anyhow::anyhow!("build_catalog reads exactly one pak")),
-        },
+        // Built from the single `pak` argument, so it holds exactly one.
+        AssetSource::Pak(paks) => catalog::pipeline::build_catalog_from_pak_with_progress(
+            &paks[0],
+            &|done, total| progress.report("extracting_catalog_inputs", done, total),
+            &building,
+        ),
     });
     progress.finish()?;
     let (entries, stats) = result.map_err(to_py_err)?;

@@ -52,7 +52,7 @@ pub fn extract_localized_text(value: &Value) -> Option<String> {
 
 /// Display rendering of a scalar JSON value: strings unquoted, booleans as
 /// `True`/`False`, null as `None`.
-fn value_to_display_string(value: &Value) -> String {
+pub(crate) fn value_to_display_string(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
         Value::Bool(b) => {

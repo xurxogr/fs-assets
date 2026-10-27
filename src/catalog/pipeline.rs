@@ -357,19 +357,7 @@ pub fn build_catalog_from_extract_dir_with_progress(
     }
     progress(files.len(), files.len())?;
 
-    catalog.sort_by(|a, b| {
-        let key_a = a
-            .get("CodeName")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_lowercase();
-        let key_b = b
-            .get("CodeName")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_lowercase();
-        key_a.cmp(&key_b)
-    });
+    catalog_assembler::sort_catalog(&mut catalog);
 
     Ok((catalog, stats))
 }

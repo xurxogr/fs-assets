@@ -307,7 +307,7 @@ def test_cli_main_restores_the_sigint_handler(tmp_path):
 def test_cli_main_returns_instead_of_exiting_on_help_and_bad_arguments(capsys):
     assert fs_assets.cli_main(["fs-assets", "--help"]) == 0
     assert fs_assets.cli_main(["fs-assets", "no-such-command"]) == 2
-    assert fs_assets.cli_main(["fs-assets", "version"]) == 0
+    assert fs_assets.cli_main(["fs-assets", "--version"]) == 0
 
 
 def test_path_arguments_accept_pathlib_paths(tmp_path):

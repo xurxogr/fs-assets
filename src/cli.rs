@@ -221,8 +221,6 @@ enum Commands {
         pattern: String,
         content_dir: PathBuf,
     },
-    /// Print the crate version.
-    Version,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -577,9 +575,6 @@ fn run_command(command: Commands) -> anyhow::Result<()> {
                 matches.len(),
                 content_dir.display()
             );
-        }
-        Commands::Version => {
-            println!("fs-assets {}", env!("CARGO_PKG_VERSION"));
         }
     }
 

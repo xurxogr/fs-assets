@@ -27,7 +27,7 @@ use serde_json::{json, Map, Value};
 use crate::catalog::blueprint_parser::{self, AssetLoader};
 use crate::catalog::damage_type_resolver;
 use crate::catalog::data_table_lookup;
-use crate::catalog::localization::LocalizationLookup;
+use crate::catalog::localization::{self, LocalizationLookup};
 use crate::catalog::stockpile_classifier::{self, StockpileCategory};
 use crate::catalog::utils::{extract_localized_text, is_truthy, normalize_object_path};
 
@@ -216,7 +216,7 @@ pub fn enrich_locales(
         else {
             continue;
         };
-        if !loc_service.is_guid(&json!(guid)) {
+        if !localization::is_guid(&guid) {
             continue;
         }
 
@@ -635,7 +635,7 @@ pub fn assemble_catalog_entry(
                     text.map(|t| json!(t)).unwrap_or(Value::Null),
                 );
             }
-            Value::String(s) if ctx.loc_service.is_guid(&value) => {
+            Value::String(s) if localization::is_guid(s) => {
                 data.insert(format!("{field}Key"), json!(s));
                 data.insert(
                     (*field).to_string(),
@@ -727,32 +727,8 @@ pub fn assemble_catalog_entry(
 // Top-level catalog assembly
 // ---------------------------------------------------------------------
 
-/// Build the complete catalog from a batch of already-loaded blueprint
-/// assets, each keyed by its `/Game/...` object path: assemble each entry,
-/// filter by content, clean
-/// (drop nulls / normalize paths), then sort by `CodeName` (case-insensitive).
-///
-/// This takes an already-loaded batch of `(object_path, asset)` pairs rather
-/// than walking the filesystem itself — that discovery step is
-/// filesystem/CLI-pipeline plumbing outside the scope of this pure function
-/// (see `blueprint_parser`'s `filesystem_loader` and `data_table_lookup`'s
-/// `filesystem_data_loader` for the same boundary). The caller discovers
-/// blueprint files under `ItemPickups`/`Vehicles`/`Structures` (excluding
-/// `ItemComponent`/`VehicleProxy`/`Ghost`/`Destroyed`) and feeds them here
-/// as `(object_path, asset)` pairs.
-pub fn build_catalog(entries: &[(String, Value)], ctx: &AssemblerContext) -> Vec<Value> {
-    let mut catalog: Vec<Value> = Vec::new();
-
-    for (object_path, asset) in entries {
-        let Some(entry) = assemble_catalog_entry(object_path, asset, ctx) else {
-            continue;
-        };
-        if !filter_blueprint_by_content(&entry) {
-            continue;
-        }
-        catalog.push(clean_entry(&entry));
-    }
-
+/// Sorts finished catalog entries by `CodeName`, ignoring case.
+pub fn sort_catalog(catalog: &mut [Value]) {
     catalog.sort_by(|a, b| {
         let key_a = a
             .get("CodeName")
@@ -766,14 +742,12 @@ pub fn build_catalog(entries: &[(String, Value)], ctx: &AssemblerContext) -> Vec
             .to_lowercase();
         key_a.cmp(&key_b)
     });
-
-    catalog
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::localization::LocalizationLookup;
+    use crate::catalog::localization::{self, LocalizationLookup};
 
     fn no_loader(_: &str) -> Option<Value> {
         None
@@ -1658,49 +1632,27 @@ mod tests {
         }
     }
 
-    mod build_catalog_tests {
+    mod sort_catalog_tests {
         use super::*;
 
         #[test]
-        fn sorts_by_codename_and_filters_non_stockpilable() {
-            let zebra = default_blueprint_asset(json!({
-                "CodeName": "Zebra", "DisplayName": "Z", "Description": "D", "Icon": "z.png", "ItemProfileData": {"bIsStockpilable": true},
-            }));
-            let alpha = default_blueprint_asset(json!({
-                "CodeName": "Alpha", "DisplayName": "A", "Description": "D", "Icon": "a.png", "ItemProfileData": {"bIsStockpilable": true},
-            }));
-            let beta = default_blueprint_asset(json!({
-                "CodeName": "Beta", "DisplayName": "B", "Description": "D", "Icon": "b.png", "ItemProfileData": {"bIsStockpilable": true},
-            }));
-            // No item profile -> neither stockpilable nor cratable -> filtered out.
-            let junk = default_blueprint_asset(json!({
-                "CodeName": "Junk", "DisplayName": "J", "Description": "D", "Icon": "j.png",
-            }));
-
-            let loc = temp_loc_service();
-            let prod_cats = HashMap::new();
-            let ctx = empty_ctx(&no_loader, &loc, &prod_cats);
-
-            let entries = vec![
-                ("/Game/Blueprints/ItemPickups/BPZ".to_string(), zebra),
-                ("/Game/Blueprints/ItemPickups/BPA".to_string(), alpha),
-                ("/Game/Blueprints/ItemPickups/BPB".to_string(), beta),
-                ("/Game/Blueprints/ItemPickups/BPJ".to_string(), junk),
+        fn sorts_by_codename_ignoring_case() {
+            let mut catalog = vec![
+                json!({"CodeName": "zebra"}),
+                json!({"CodeName": "Alpha"}),
+                json!({}),
+                json!({"CodeName": "beta"}),
             ];
-
-            let catalog = build_catalog(&entries, &ctx);
-            assert_eq!(catalog.len(), 3);
-            assert_eq!(catalog[0]["CodeName"], json!("Alpha"));
-            assert_eq!(catalog[1]["CodeName"], json!("Beta"));
-            assert_eq!(catalog[2]["CodeName"], json!("Zebra"));
-        }
-
-        #[test]
-        fn empty_entries_produce_empty_catalog() {
-            let loc = temp_loc_service();
-            let prod_cats = HashMap::new();
-            let ctx = empty_ctx(&no_loader, &loc, &prod_cats);
-            assert_eq!(build_catalog(&[], &ctx), Vec::<Value>::new());
+            sort_catalog(&mut catalog);
+            assert_eq!(
+                catalog,
+                vec![
+                    json!({}),
+                    json!({"CodeName": "Alpha"}),
+                    json!({"CodeName": "beta"}),
+                    json!({"CodeName": "zebra"}),
+                ]
+            );
         }
     }
 }
