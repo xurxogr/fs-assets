@@ -589,32 +589,28 @@ struct SummaryCursor<'a> {
 }
 
 impl<'a> SummaryCursor<'a> {
+    /// The next `n` bytes, or `None` if fewer remain. Lengths come from the
+    /// file, so the end offset is computed with `checked_add`.
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let end = self.pos.checked_add(n)?;
+        let bytes = self.data.get(self.pos..end)?;
+        self.pos = end;
+        Some(bytes)
+    }
     fn i32(&mut self) -> Option<i32> {
-        let v = i32::from_le_bytes(self.data.get(self.pos..self.pos + 4)?.try_into().ok()?);
-        self.pos += 4;
-        Some(v)
+        Some(i32::from_le_bytes(self.take(4)?.try_into().ok()?))
     }
     fn u32(&mut self) -> Option<u32> {
-        let v = u32::from_le_bytes(self.data.get(self.pos..self.pos + 4)?.try_into().ok()?);
-        self.pos += 4;
-        Some(v)
+        Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
     }
     fn i64(&mut self) -> Option<i64> {
-        let v = i64::from_le_bytes(self.data.get(self.pos..self.pos + 8)?.try_into().ok()?);
-        self.pos += 8;
-        Some(v)
+        Some(i64::from_le_bytes(self.take(8)?.try_into().ok()?))
     }
     fn u16(&mut self) -> Option<u16> {
-        let v = u16::from_le_bytes(self.data.get(self.pos..self.pos + 2)?.try_into().ok()?);
-        self.pos += 2;
-        Some(v)
+        Some(u16::from_le_bytes(self.take(2)?.try_into().ok()?))
     }
     fn skip(&mut self, n: usize) -> Option<()> {
-        if self.pos + n > self.data.len() {
-            return None;
-        }
-        self.pos += n;
-        Some(())
+        self.take(n).map(|_| ())
     }
     /// `FString`: `i32` length `n`; `n > 0` -> `n` bytes of (8-bit,
     /// nul-terminated) ANSI; `n < 0` -> `-n * 2` bytes of UTF-16LE
@@ -622,12 +618,11 @@ impl<'a> SummaryCursor<'a> {
     /// needed here, not the decoded text.
     fn skip_fstring(&mut self) -> Option<()> {
         let n = self.i32()?;
-        if n > 0 {
-            self.skip(n as usize)
-        } else if n < 0 {
-            self.skip((-n) as usize * 2)
+        let len = usize::try_from(n.unsigned_abs()).ok()?;
+        if n < 0 {
+            self.skip(len.checked_mul(2)?)
         } else {
-            Some(())
+            self.skip(len)
         }
     }
     fn skip_engine_version(&mut self) -> Option<()> {
@@ -1117,6 +1112,36 @@ mod tests {
     use unreal_asset::properties::set_property::SetProperty;
     use unreal_asset::properties::str_property::NameProperty;
     use unreal_asset::unversioned::ancestry::Ancestry;
+
+    #[test]
+    fn summary_cursor_fails_on_fstring_lengths_past_the_data() {
+        for n in [i32::MIN, i32::MAX, -3, 5] {
+            let mut data = n.to_le_bytes().to_vec();
+            data.extend_from_slice(b"abc\0");
+            let mut cursor = SummaryCursor {
+                data: &data,
+                pos: 0,
+            };
+            assert_eq!(cursor.skip_fstring(), None, "{n}");
+        }
+    }
+
+    #[test]
+    fn summary_cursor_skips_fstrings_that_fit() {
+        let mut data = 4i32.to_le_bytes().to_vec();
+        data.extend_from_slice(b"abc\0");
+        data.extend_from_slice(&(-2i32).to_le_bytes());
+        data.extend_from_slice(&[b'a', 0, 0, 0]);
+        let mut cursor = SummaryCursor {
+            data: &data,
+            pos: 0,
+        };
+        assert_eq!(cursor.skip_fstring(), Some(()));
+        assert_eq!(cursor.skip_fstring(), Some(()));
+        assert_eq!(cursor.pos, data.len());
+        assert_eq!(cursor.skip(usize::MAX), None);
+        assert_eq!(cursor.i32(), None);
+    }
 
     fn fixture(name: &str) -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
