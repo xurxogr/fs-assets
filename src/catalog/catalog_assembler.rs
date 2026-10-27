@@ -365,12 +365,18 @@ pub fn enrich_item_component_class(
         return;
     };
 
-    let (mut item_comp, bp_path) = match &item_comp_raw {
+    // The component's path relative to the Blueprints folder, from either a
+    // `/Game/Blueprints/...` reference or a normalized
+    // `War/Content/Blueprints/....0` object path.
+    let (mut item_comp, relative_path) = match &item_comp_raw {
         Value::String(obj_path) => {
-            let bp_path = format!("{}.json", obj_path.replace("/Game/Blueprints/", ""));
+            let relative_path = obj_path
+                .strip_prefix("/Game/Blueprints/")
+                .unwrap_or(obj_path)
+                .to_string();
             let mut m = Map::new();
             m.insert("ObjectPath".to_string(), json!(obj_path));
-            (m, bp_path)
+            (m, relative_path)
         }
         Value::Object(m) => {
             let Some(obj_path) = m.get("ObjectPath").and_then(Value::as_str) else {
@@ -379,15 +385,19 @@ pub fn enrich_item_component_class(
             if obj_path.is_empty() {
                 return;
             }
-            let bp_path = obj_path
-                .replace("War/Content/Blueprints/", "")
-                .replace(".0", ".json");
-            (m.clone(), bp_path)
+            let relative_path = obj_path
+                .strip_prefix("War/Content/Blueprints/")
+                .unwrap_or(obj_path);
+            let relative_path = relative_path
+                .strip_suffix(".0")
+                .unwrap_or(relative_path)
+                .to_string();
+            (m.clone(), relative_path)
         }
         _ => return,
     };
 
-    let object_path = format!("/Game/Blueprints/{}", bp_path.trim_end_matches(".json"));
+    let object_path = format!("/Game/Blueprints/{relative_path}");
     let Some(comp_asset) = blueprint_loader(&object_path) else {
         // Parser couldn't load the component blueprint: still write back the
         // normalized (string -> dict) shape so consumers always see a
@@ -440,9 +450,12 @@ pub fn enrich_item_component_class(
         if let Some(Value::Array(projectile_classes)) = item_comp.get("ProjectileClasses") {
             if let Some(Value::String(first_proj)) = projectile_classes.first() {
                 if first_proj.starts_with("/Game/") {
-                    let proj_path = format!("{}.json", first_proj.replace("/Game/Blueprints/", ""));
-                    let proj_object_path =
-                        format!("/Game/Blueprints/{}", proj_path.trim_end_matches(".json"));
+                    let proj_object_path = format!(
+                        "/Game/Blueprints/{}",
+                        first_proj
+                            .strip_prefix("/Game/Blueprints/")
+                            .unwrap_or(first_proj)
+                    );
                     if let Some(proj_asset) = blueprint_loader(&proj_object_path) {
                         if let Some(Value::Object(proj_data)) =
                             blueprint_parser::extract_catalog_data(
@@ -1177,6 +1190,22 @@ mod tests {
             data.insert(
                 "ItemComponentClass".to_string(),
                 json!({"ObjectPath": "War/Content/Blueprints/Items/BPComp.0"}),
+            );
+            enrich_item_component_class(&mut data, false, &loader);
+            assert_eq!(data["ItemComponentClass"]["Damage"], json!(25));
+        }
+
+        #[test]
+        fn dict_path_keeps_a_dot_zero_inside_the_name() {
+            let comp_asset = default_blueprint_asset(json!({"Damage": 25}));
+            let mut assets = StdHashMap::new();
+            assets.insert("/Game/Blueprints/Items/BPComp.0Mk2".to_string(), comp_asset);
+            let loader = map_loader(assets);
+
+            let mut data = Map::new();
+            data.insert(
+                "ItemComponentClass".to_string(),
+                json!({"ObjectPath": "War/Content/Blueprints/Items/BPComp.0Mk2.0"}),
             );
             enrich_item_component_class(&mut data, false, &loader);
             assert_eq!(data["ItemComponentClass"]["Damage"], json!(25));
