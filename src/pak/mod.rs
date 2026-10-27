@@ -1,6 +1,6 @@
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Seek};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use repak::PakBuilder;
 
@@ -71,7 +71,7 @@ where
             .get(&path, &mut file)
             .map_err(|e| anyhow::anyhow!("failed to read {path}: {e}"))?;
 
-        let dest = output_dir.join(path.trim_start_matches('/'));
+        let dest = contained_path(output_dir, &path)?;
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -82,6 +82,30 @@ where
 
     extracted.sort();
     Ok(extracted)
+}
+
+/// `output_dir` joined with `entry`, a path read from an untrusted pak index.
+/// Only plain name components are accepted, split on both `/` and `\\`, so an
+/// entry can't climb out with `..` or replace `output_dir` with an absolute or
+/// drive-prefixed path. A `:` is refused on every host, since on Windows it
+/// starts a drive prefix (`C:`) or an alternate data stream. Empty and `.`
+/// components are skipped.
+fn contained_path(output_dir: &Path, entry: &str) -> anyhow::Result<PathBuf> {
+    let mut dest = output_dir.to_path_buf();
+    for part in entry
+        .split(['/', '\\'])
+        .filter(|p| !p.is_empty() && *p != ".")
+    {
+        let mut components = Path::new(part).components();
+        match (components.next(), components.next()) {
+            (Some(Component::Normal(name)), None) if !part.contains(':') => dest.push(name),
+            _ => anyhow::bail!("pak entry {entry:?} escapes the output directory"),
+        }
+    }
+    if dest == output_dir {
+        anyhow::bail!("pak entry {entry:?} has no file name");
+    }
+    Ok(dest)
 }
 
 /// Packs every file under `input_dir` into a new `.pak` at `output`. `mount_point` and `version` should match whatever pak
@@ -200,6 +224,47 @@ mod tests {
         .unwrap();
 
         assert_eq!(reports.into_inner(), vec![(0, 1), (1, 1)]);
+    }
+
+    fn build_pak_with(entries: &[&str]) -> Vec<u8> {
+        let mut buf = Cursor::new(Vec::new());
+        let mut writer =
+            Builder::new().writer(&mut buf, repak::Version::V11, "../../../".to_string(), None);
+        for entry in entries {
+            writer.write_file(entry, false, b"evil".as_slice()).unwrap();
+        }
+        writer.write_index().unwrap();
+        buf.into_inner()
+    }
+
+    #[test]
+    fn refuses_entries_that_escape_the_output_dir() {
+        for entry in [
+            "../escape.txt",
+            "dir/../../escape.txt",
+            "dir\\..\\..\\escape.txt",
+            "C:/escape.txt",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let pak_path = tmp.path().join("evil.pak");
+            fs::write(&pak_path, build_pak_with(&[entry])).unwrap();
+
+            let out_dir = tmp.path().join("nested/out");
+            let err = extract(&pak_path, None, &out_dir).unwrap_err();
+            assert!(err.to_string().contains("escapes"), "{entry}: {err}");
+            assert!(!tmp.path().join("nested/escape.txt").exists(), "{entry}");
+            assert!(!tmp.path().join("escape.txt").exists(), "{entry}");
+        }
+    }
+
+    #[test]
+    fn contained_path_keeps_plain_entries_under_the_output_dir() {
+        let out = Path::new("out");
+        assert_eq!(
+            contained_path(out, "/War/./Content/a.uasset").unwrap(),
+            out.join("War").join("Content").join("a.uasset")
+        );
+        assert!(contained_path(out, "/").is_err());
     }
 
     #[test]
