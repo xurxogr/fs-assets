@@ -99,7 +99,8 @@ pub fn extract_icons(request: &ExtractIconsRequest) -> anyhow::Result<ExtractIco
 
 /// Decodes each of `items`' icons through `resolve` and writes it into
 /// `output` as `<code>.png`, with its subtype icon drawn over it when
-/// `subicons` is set.
+/// `subicons` is set. Fails before writing anything if a code isn't a plain
+/// file name, since codes come from the (possibly hostile) catalog.
 fn write_icons<F>(
     items: &[CatalogIconItem],
     resolve: F,
@@ -109,6 +110,9 @@ fn write_icons<F>(
 where
     F: Fn(&str) -> Option<PathBuf>,
 {
+    if let Some(item) = items.iter().find(|item| !is_plain_file_name(&item.code)) {
+        anyhow::bail!("catalog CodeName {:?} is not a plain file name", item.code);
+    }
     std::fs::create_dir_all(output)?;
     let mut stats = ExtractIconsStats::default();
     let mut subicon_cache: HashMap<String, Option<DynamicImage>> = HashMap::new();
@@ -150,6 +154,13 @@ where
     }
 
     Ok(stats)
+}
+
+/// Whether `name` names a file directly inside a directory on every host:
+/// not empty, `.` or `..`, and free of path separators, drive or stream
+/// colons and NULs.
+fn is_plain_file_name(name: &str) -> bool {
+    !matches!(name, "" | "." | "..") && !name.contains(['/', '\\', ':', '\0'])
 }
 
 /// Resolves and decodes a subtype icon, reporting (not failing on) a decode
@@ -233,6 +244,25 @@ mod tests {
         assert_eq!(rifle.get_pixel(0, 0), &image::Rgba([0, 0, 0, 255]));
         assert_ne!(ammo.get_pixel(0, 0), &image::Rgba([0, 0, 0, 255]));
         assert_eq!(ammo.get_pixel(31, 31), &image::Rgba([0, 0, 0, 255]));
+    }
+
+    #[test]
+    fn refuses_codes_that_are_not_plain_file_names() {
+        for code in ["../escape", "a/b", "a\\b", "C:escape", "..", ""] {
+            let tmp = tempfile::tempdir().unwrap();
+            let (icon_path, file) = write_icon(tmp.path(), RIFLE, [0, 0, 0, 255]);
+            let items = vec![CatalogIconItem {
+                code: code.to_string(),
+                ..items()[0].clone()
+            }];
+            let out = tmp.path().join("nested/out");
+
+            let result = write_icons(&items, resolver([(icon_path, file)].into()), false, &out);
+
+            assert!(result.is_err(), "{code:?}");
+            assert!(!out.exists(), "{code:?}");
+            assert!(!tmp.path().join("nested/escape.png").exists(), "{code:?}");
+        }
     }
 
     #[test]
