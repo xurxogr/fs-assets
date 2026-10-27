@@ -1,22 +1,15 @@
 //! Localization service for resolving text GUIDs to localized strings.
 //!
-//! Parses UE4 `.locres` files (`FTextLocalizationResource` format) for
+//! Reads UE4 `.locres` files (through [`crate::locres::parse`]) for
 //! multi-language text lookup.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io::{self, BufReader, Read, Seek, SeekFrom};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-
-use crate::locres::TextBudget;
-
-/// Magic number for modern locres files (UE4 `FTextLocalizationResource`).
-pub const LOCRES_MAGIC: [u8; 16] = [
-    0x0e, 0x14, 0x74, 0x75, 0x67, 0x4a, 0x03, 0xfc, 0x4a, 0x15, 0x90, 0x9d, 0xc3, 0x37, 0x7f, 0x1b,
-];
 
 /// Supported languages and their folder names.
 pub const SUPPORTED_LANGUAGES: &[(&str, &str)] = &[
@@ -51,205 +44,28 @@ fn resolve_dir(path: &Path) -> PathBuf {
     })
 }
 
-fn try_read_exact<R: Read>(r: &mut R, buf: &mut [u8]) -> io::Result<bool> {
-    let mut filled = 0;
-    while filled < buf.len() {
-        match r.read(&mut buf[filled..])? {
-            0 => return Ok(false),
-            n => filled += n,
-        }
-    }
-    Ok(true)
-}
-
-fn read_u8<R: Read>(r: &mut R) -> io::Result<u8> {
-    let mut b = [0u8; 1];
-    r.read_exact(&mut b)?;
-    Ok(b[0])
-}
-
-fn read_i32<R: Read>(r: &mut R) -> io::Result<i32> {
-    let mut b = [0u8; 4];
-    r.read_exact(&mut b)?;
-    Ok(i32::from_le_bytes(b))
-}
-
-fn read_u32<R: Read>(r: &mut R) -> io::Result<u32> {
-    let mut b = [0u8; 4];
-    r.read_exact(&mut b)?;
-    Ok(u32::from_le_bytes(b))
-}
-
-fn read_i64<R: Read>(r: &mut R) -> io::Result<i64> {
-    let mut b = [0u8; 8];
-    r.read_exact(&mut b)?;
-    Ok(i64::from_le_bytes(b))
-}
-
-/// Read `len` bytes, or `None` if the file ends first. The buffer grows as
-/// data actually arrives instead of reserving `len` up front: `len` comes
-/// from the file, so a hostile length can't make us allocate more than the
-/// file really holds.
-fn read_bytes<R: Read>(r: &mut R, len: usize) -> io::Result<Option<Vec<u8>>> {
-    let mut data = Vec::new();
-    r.take(len as u64).read_to_end(&mut data)?;
-    Ok((data.len() == len).then_some(data))
-}
-
-/// Read a UE4 `FString` — handles both ANSI and Unicode. Returns `Ok(None)`
-/// if the read was truncated (not an error — truncation is detected by
-/// length rather than raised).
-fn read_fstring<R: Read>(r: &mut R) -> io::Result<Option<String>> {
-    let mut len_bytes = [0u8; 4];
-    if !try_read_exact(r, &mut len_bytes)? {
-        return Ok(None);
-    }
-    let length = i32::from_le_bytes(len_bytes);
-    if length == 0 {
-        return Ok(Some(String::new()));
-    }
-
-    if length < 0 {
-        // Unicode (UTF-16)
-        // `unsigned_abs` so `i32::MIN` doesn't overflow the negation.
-        let Some(data) = read_bytes(r, length.unsigned_abs() as usize * 2)? else {
-            return Ok(None);
-        };
-        let units: Vec<u16> = data
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|&pair| u16::from_le_bytes(pair))
-            .collect();
-        let s = String::from_utf16_lossy(&units);
-        Ok(Some(s.trim_end_matches('\0').to_string()))
-    } else {
-        // ANSI (Latin-1)
-        let Some(data) = read_bytes(r, length as usize)? else {
-            return Ok(None);
-        };
-        let s: String = data.iter().map(|&b| b as char).collect();
-        Ok(Some(s.trim_end_matches('\0').to_string()))
-    }
-}
-
-/// Read an `FTextKey` — hash + string.
-fn read_text_key<R: Read>(r: &mut R) -> io::Result<(u32, Option<String>)> {
-    let str_hash = read_u32(r)?;
-    let string = read_fstring(r)?;
-    Ok((str_hash, string))
-}
-
-/// Read the compact string array table from a locres file.
-fn read_string_array<R: Read + Seek>(r: &mut R, str_array_offset: i64) -> io::Result<Vec<String>> {
-    let mut string_array = Vec::new();
-    if str_array_offset == -1 {
-        return Ok(string_array);
-    }
-
-    let current_pos = r.stream_position()?;
-    let file_len = r.seek(SeekFrom::End(0))?;
-    let offset = u64::try_from(str_array_offset)
-        .ok()
-        .filter(|&offset| offset < file_len)
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "string array offset {str_array_offset} is outside the file ({file_len} bytes)"
-                ),
-            )
-        })?;
-    r.seek(SeekFrom::Start(offset))?;
-
-    let str_count = read_i32(r)?;
-    for _ in 0..str_count {
-        match read_fstring(r)? {
-            Some(s) => {
-                read_u32(r)?; // source string hash
-                string_array.push(s);
-            }
-            None => break,
-        }
-    }
-
-    r.seek(SeekFrom::Start(current_pos))?;
-    Ok(string_array)
-}
-
-/// Read all namespace/key/string entries following the string array.
-fn read_namespace_strings<R: Read>(
-    r: &mut R,
-    version: u8,
-    string_array: &[String],
-    text_budget: &mut TextBudget,
-) -> io::Result<HashMap<String, String>> {
-    let mut strings = HashMap::new();
-
-    let namespace_count = read_u32(r)?;
-    for _ in 0..namespace_count {
-        read_text_key(r)?; // namespace key (hash + string), discarded
-
-        let key_count = read_u32(r)?;
-        for _ in 0..key_count {
-            let (_, key_string) = read_text_key(r)?;
-            read_u32(r)?; // source string hash
-
-            let value = if version >= 1 {
-                let str_index = read_i32(r)?;
-                let text = usize::try_from(str_index)
-                    .ok()
-                    .and_then(|index| string_array.get(index))
-                    .map_or("", String::as_str);
-                text_budget.spend(text)?;
-                text.to_string()
-            } else {
-                read_fstring(r)?.unwrap_or_default()
-            };
-
-            if let Some(key) = key_string {
-                if !key.is_empty() {
-                    strings.insert(key, value);
-                }
-            }
-        }
-    }
-
-    Ok(strings)
-}
-
-fn parse_locres_inner(filepath: &Path) -> io::Result<HashMap<String, String>> {
-    let mut f = BufReader::new(File::open(filepath)?);
-
-    let mut magic = [0u8; 16];
-    f.read_exact(&mut magic)?;
-    if magic != LOCRES_MAGIC {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "bad magic (legacy .locres format is not supported)",
-        ));
-    }
-
-    let version = read_u8(&mut f)?;
-    let str_array_offset = read_i64(&mut f)?;
-    let string_array = read_string_array(&mut f, str_array_offset)?;
-
-    if version >= 2 {
-        read_u32(&mut f)?; // entries count, unused
-    }
-
-    let mut text_budget = TextBudget::new(f.get_ref().metadata()?.len());
-    read_namespace_strings(&mut f, version, &string_array, &mut text_budget)
-}
-
-/// Parse a UE4 `.locres` file. A parse error (malformed or legacy file,
-/// truncated data) is reported on stderr and yields an empty map, so one bad
+/// The key -> text strings of a `.locres` file, every namespace flattened
+/// into one map (keys are GUIDs, unique across namespaces), read with
+/// [`crate::locres::parse`]. A file that fails to parse (malformed, legacy
+/// or truncated) is reported on stderr and yields an empty map, so one bad
 /// locale file never aborts a catalog build but doesn't go unnoticed either.
 fn parse_locres(filepath: &Path) -> HashMap<String, String> {
-    parse_locres_inner(filepath).unwrap_or_else(|e| {
-        eprintln!("build-catalog: failed to parse {}: {e}", filepath.display());
-        HashMap::new()
-    })
+    match crate::locres::parse(filepath) {
+        Ok(document) => document
+            .namespaces
+            .into_iter()
+            .flat_map(|namespace| namespace.entries)
+            .filter(|entry| !entry.key.is_empty())
+            .map(|entry| (entry.key, entry.text))
+            .collect(),
+        Err(e) => {
+            eprintln!(
+                "build-catalog: failed to parse {}: {e:#}",
+                filepath.display()
+            );
+            HashMap::new()
+        }
+    }
 }
 
 /// The paths of `dir`'s entries, reporting (and skipping) the directory or
@@ -387,55 +203,26 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Build a mock `.locres` file matching the format `parse_locres` reads.
+    /// Writes a `.locres` holding `strings` as (key, text) pairs.
     fn create_mock_locres(filepath: &Path, strings: &[(&str, &str)]) {
         fs::create_dir_all(filepath.parent().unwrap()).unwrap();
-
-        let mut buf: Vec<u8> = Vec::new();
-        buf.extend_from_slice(&LOCRES_MAGIC);
-        buf.push(2); // version 2 (Optimized_CRC32)
-
-        let str_array_offset_pos = buf.len();
-        buf.extend_from_slice(&(-1i64).to_le_bytes());
-
-        buf.extend_from_slice(&(strings.len() as u32).to_le_bytes()); // entries count
-        buf.extend_from_slice(&1u32.to_le_bytes()); // namespace count
-
-        buf.extend_from_slice(&0u32.to_le_bytes()); // namespace key hash
-        buf.extend_from_slice(&0i32.to_le_bytes()); // empty namespace string
-
-        buf.extend_from_slice(&(strings.len() as u32).to_le_bytes()); // key count
-
-        let string_list: Vec<&str> = strings.iter().map(|(_, v)| *v).collect();
-
-        for (guid, text) in strings {
-            buf.extend_from_slice(&0u32.to_le_bytes()); // key hash
-
-            let mut guid_bytes = guid.as_bytes().to_vec();
-            guid_bytes.push(0);
-            buf.extend_from_slice(&(guid_bytes.len() as i32).to_le_bytes());
-            buf.extend_from_slice(&guid_bytes);
-
-            buf.extend_from_slice(&0u32.to_le_bytes()); // source string hash
-
-            let str_index = string_list.iter().position(|s| s == text).unwrap();
-            buf.extend_from_slice(&(str_index as i32).to_le_bytes());
-        }
-
-        let str_array_offset = buf.len() as i64;
-        buf.extend_from_slice(&(string_list.len() as i32).to_le_bytes());
-        for text in &string_list {
-            let mut text_bytes = text.as_bytes().to_vec();
-            text_bytes.push(0);
-            buf.extend_from_slice(&(text_bytes.len() as i32).to_le_bytes());
-            buf.extend_from_slice(&text_bytes);
-            buf.extend_from_slice(&0u32.to_le_bytes()); // source string hash
-        }
-
-        buf[str_array_offset_pos..str_array_offset_pos + 8]
-            .copy_from_slice(&str_array_offset.to_le_bytes());
-
-        fs::write(filepath, buf).unwrap();
+        let document = crate::locres::LocresDocument {
+            version: 2,
+            namespaces: vec![crate::locres::LocresNamespace {
+                namespace_hash: 0,
+                namespace: String::new(),
+                entries: strings
+                    .iter()
+                    .map(|(key, text)| crate::locres::LocresEntry {
+                        key_hash: 0,
+                        key: key.to_string(),
+                        source_hash: 0,
+                        text: text.to_string(),
+                    })
+                    .collect(),
+            }],
+        };
+        crate::locres::write(&document, filepath).unwrap();
     }
 
     mod init {
@@ -661,19 +448,6 @@ mod tests {
         }
 
         #[test]
-        fn legacy_and_truncated_files_are_parse_errors_not_empty_maps() {
-            let tmp = tempfile::tempdir().unwrap();
-            let legacy = tmp.path().join("legacy.locres");
-            fs::write(&legacy, b"WRONG_MAGIC_BYTES").unwrap();
-            let err = parse_locres_inner(&legacy).unwrap_err();
-            assert!(err.to_string().contains("bad magic"), "{err}");
-
-            let truncated = tmp.path().join("truncated.locres");
-            fs::write(&truncated, LOCRES_MAGIC).unwrap();
-            assert!(parse_locres_inner(&truncated).is_err());
-        }
-
-        #[test]
         fn handles_missing_language_dir() {
             let tmp = tempfile::tempdir().unwrap();
             let en_path = tmp.path().join("Foxhole-Content/en/test.locres");
@@ -725,60 +499,10 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let locres_path = tmp.path().join("Foxhole-Content/en/corrupt.locres");
             fs::create_dir_all(locres_path.parent().unwrap()).unwrap();
-            fs::write(&locres_path, LOCRES_MAGIC).unwrap();
+            fs::write(&locres_path, crate::locres::LOCRES_MAGIC).unwrap();
 
             let lookup = LocalizationLookup::new(tmp.path(), None);
             assert_eq!(lookup.get("SOMEGUID", Some("en")), None);
-        }
-
-        /// A version-2 header with `str_array_offset`, followed by `rest`.
-        fn header(str_array_offset: i64, rest: &[u8]) -> Vec<u8> {
-            let mut buf = LOCRES_MAGIC.to_vec();
-            buf.push(2);
-            buf.extend_from_slice(&str_array_offset.to_le_bytes());
-            buf.extend_from_slice(rest);
-            buf
-        }
-
-        #[test]
-        fn hostile_counts_and_lengths_error_instead_of_allocating() {
-            let tmp = tempfile::tempdir().unwrap();
-            let path = tmp.path().join("hostile.locres");
-            for length in [i32::MAX, i32::MIN, -1_000_000_000] {
-                let mut rest = 0u32.to_le_bytes().to_vec(); // entries count
-                rest.extend_from_slice(&u32::MAX.to_le_bytes()); // namespace count
-                rest.extend_from_slice(&0u32.to_le_bytes()); // namespace hash
-                rest.extend_from_slice(&length.to_le_bytes());
-                fs::write(&path, header(-1, &rest)).unwrap();
-                assert!(parse_locres_inner(&path).is_err(), "{length}");
-            }
-        }
-
-        #[test]
-        fn rejects_a_string_array_offset_outside_the_file() {
-            let tmp = tempfile::tempdir().unwrap();
-            let path = tmp.path().join("offset.locres");
-            for offset in [-2, 1 << 40] {
-                fs::write(&path, header(offset, &[0; 8])).unwrap();
-                let err = parse_locres_inner(&path).unwrap_err();
-                assert!(
-                    err.to_string().contains("outside the file"),
-                    "{offset}: {err}"
-                );
-            }
-        }
-
-        #[test]
-        fn rejects_entries_that_resolve_to_far_more_text_than_the_file() {
-            let tmp = tempfile::tempdir().unwrap();
-            let path = tmp.path().join("shared.locres");
-
-            fs::write(&path, crate::locres::shared_text_locres(4, 100)).unwrap();
-            assert_eq!(parse_locres_inner(&path).unwrap().len(), 4);
-
-            fs::write(&path, crate::locres::shared_text_locres(2000, 4096)).unwrap();
-            let err = parse_locres_inner(&path).unwrap_err();
-            assert!(err.to_string().contains("the file's size in text"), "{err}");
         }
     }
 
@@ -788,51 +512,10 @@ mod tests {
         #[test]
         fn handles_unicode_strings() {
             let tmp = tempfile::tempdir().unwrap();
-            let locres_path = tmp.path().join("Foxhole-Content/zh/test.locres");
-            fs::create_dir_all(locres_path.parent().unwrap()).unwrap();
-
-            let mut buf: Vec<u8> = Vec::new();
-            buf.extend_from_slice(&LOCRES_MAGIC);
-            buf.push(2); // version 2
-
-            let str_array_offset_pos = buf.len();
-            buf.extend_from_slice(&(-1i64).to_le_bytes());
-
-            buf.extend_from_slice(&1u32.to_le_bytes()); // entries count
-            buf.extend_from_slice(&1u32.to_le_bytes()); // namespace count
-
-            buf.extend_from_slice(&0u32.to_le_bytes()); // namespace hash
-            buf.extend_from_slice(&0i32.to_le_bytes()); // empty namespace string
-
-            buf.extend_from_slice(&1u32.to_le_bytes()); // key count
-
-            buf.extend_from_slice(&0u32.to_le_bytes()); // key hash
-            let guid = "UNICODEGUID12345678901234567890";
-            let mut guid_bytes = guid.as_bytes().to_vec();
-            guid_bytes.push(0);
-            buf.extend_from_slice(&(guid_bytes.len() as i32).to_le_bytes());
-            buf.extend_from_slice(&guid_bytes);
-
-            buf.extend_from_slice(&0u32.to_le_bytes()); // source string hash
-            buf.extend_from_slice(&0i32.to_le_bytes()); // string index
-
-            let str_array_offset = buf.len() as i64;
-            buf.extend_from_slice(&1i32.to_le_bytes()); // string array count
-
-            let chinese_text = "你好世界";
-            let units: Vec<u16> = chinese_text.encode_utf16().collect();
-            buf.extend_from_slice(&(-(units.len() as i32 + 1)).to_le_bytes());
-            for u in &units {
-                buf.extend_from_slice(&u.to_le_bytes());
-            }
-            buf.extend_from_slice(&0u16.to_le_bytes()); // null terminator
-
-            buf.extend_from_slice(&0u32.to_le_bytes()); // source string hash
-
-            buf[str_array_offset_pos..str_array_offset_pos + 8]
-                .copy_from_slice(&str_array_offset.to_le_bytes());
-
-            fs::write(&locres_path, buf).unwrap();
+            create_mock_locres(
+                &tmp.path().join("Foxhole-Content/zh/test.locres"),
+                &[("UNICODEGUID12345678901234567890", "你好世界")],
+            );
 
             let lookup = LocalizationLookup::new(tmp.path(), None);
             assert_eq!(

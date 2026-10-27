@@ -601,52 +601,23 @@ mod tests {
             assert_eq!(result["DescriptionDetails"], json!("Explicit line"));
         }
 
-        /// Minimal hand-rolled `.locres` writer, matching the format the
-        /// `localization` module's own test suite builds (see
-        /// `catalog::localization::tests::create_mock_locres`), specialized
-        /// to a single GUID/text pair.
+        /// Writes a `.locres` holding the single `guid` -> `text` pair.
         fn write_mock_locres(filepath: &std::path::Path, guid: &str, text: &str) {
-            use crate::catalog::localization::LOCRES_MAGIC;
-
             std::fs::create_dir_all(filepath.parent().unwrap()).unwrap();
-
-            let mut buf: Vec<u8> = Vec::new();
-            buf.extend_from_slice(&LOCRES_MAGIC);
-            buf.push(2); // version 2
-
-            let str_array_offset_pos = buf.len();
-            buf.extend_from_slice(&(-1i64).to_le_bytes());
-
-            buf.extend_from_slice(&1u32.to_le_bytes()); // entries count
-            buf.extend_from_slice(&1u32.to_le_bytes()); // namespace count
-
-            buf.extend_from_slice(&0u32.to_le_bytes()); // namespace key hash
-            buf.extend_from_slice(&0i32.to_le_bytes()); // empty namespace string
-
-            buf.extend_from_slice(&1u32.to_le_bytes()); // key count
-
-            buf.extend_from_slice(&0u32.to_le_bytes()); // key hash
-            let mut guid_bytes = guid.as_bytes().to_vec();
-            guid_bytes.push(0);
-            buf.extend_from_slice(&(guid_bytes.len() as i32).to_le_bytes());
-            buf.extend_from_slice(&guid_bytes);
-
-            buf.extend_from_slice(&0u32.to_le_bytes()); // source string hash
-            buf.extend_from_slice(&0i32.to_le_bytes()); // string index (0)
-
-            let str_array_offset = buf.len() as i64;
-            buf.extend_from_slice(&1i32.to_le_bytes()); // string array count
-
-            let mut text_bytes = text.as_bytes().to_vec();
-            text_bytes.push(0);
-            buf.extend_from_slice(&(text_bytes.len() as i32).to_le_bytes());
-            buf.extend_from_slice(&text_bytes);
-            buf.extend_from_slice(&0u32.to_le_bytes()); // source string hash
-
-            buf[str_array_offset_pos..str_array_offset_pos + 8]
-                .copy_from_slice(&str_array_offset.to_le_bytes());
-
-            std::fs::write(filepath, buf).unwrap();
+            let document = crate::locres::LocresDocument {
+                version: 2,
+                namespaces: vec![crate::locres::LocresNamespace {
+                    namespace_hash: 0,
+                    namespace: String::new(),
+                    entries: vec![crate::locres::LocresEntry {
+                        key_hash: 0,
+                        key: guid.to_string(),
+                        source_hash: 0,
+                        text: text.to_string(),
+                    }],
+                }],
+            };
+            crate::locres::write(&document, filepath).unwrap();
         }
     }
 

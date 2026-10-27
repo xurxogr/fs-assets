@@ -1,12 +1,10 @@
 //! Lossless `.locres` (UE4 `FTextLocalizationResource`, version 2) dump/pack.
 //!
-//! This is a *separate* reader/writer from `catalog::localization`'s
-//! `parse_locres` — that one is deliberately lossy (flattens every namespace
-//! into one key->text map, drops hashes and ref-counts) because it only
-//! needs key lookup for catalog building. This module exists to round-trip
-//! a `.locres` byte-for-byte-equivalent (modulo `ref_count`, which is a
-//! non-authoritative size hint — see below), which the translation workflow
-//! requires.
+//! It round-trips a `.locres` byte-for-byte-equivalent (modulo `ref_count`,
+//! which is a non-authoritative size hint — see below), which the
+//! translation workflow requires. The catalog build reads `.locres` files
+//! through [`parse`] too, flattening every namespace into one key->text map
+//! (see `catalog::localization`).
 //!
 //! Hashes (`key_hash`/`namespace_hash`/`source_hash`) are never recomputed:
 //! they are carried over from the input. The `en` file holds every namespace
@@ -89,8 +87,7 @@ fn read_bytes<R: Read>(r: &mut R, len: usize) -> io::Result<Vec<u8>> {
 }
 
 /// Read a UE4 `FString`: `i32` length prefix, empty/UTF-16/Latin-1 body per
-/// the sign of the length, trailing NUL stripped. Unlike
-/// `catalog::localization::read_fstring`, truncation is a hard error here —
+/// the sign of the length, trailing NUL stripped. Truncation is an error:
 /// this reader is meant to faithfully round-trip real files, not to shrug
 /// off malformed ones.
 fn read_fstring<R: Read>(r: &mut R) -> io::Result<String> {
@@ -161,18 +158,18 @@ const MAX_TEXT_PER_FILE_BYTE: u64 = 16;
 
 /// Running total of the text resolved from one `.locres` file, failing once
 /// it passes [`MAX_TEXT_PER_FILE_BYTE`] times the file's size.
-pub(crate) struct TextBudget {
+struct TextBudget {
     remaining: u64,
 }
 
 impl TextBudget {
-    pub(crate) fn new(file_len: u64) -> Self {
+    fn new(file_len: u64) -> Self {
         Self {
             remaining: file_len.saturating_mul(MAX_TEXT_PER_FILE_BYTE),
         }
     }
 
-    pub(crate) fn spend(&mut self, text: &str) -> io::Result<()> {
+    fn spend(&mut self, text: &str) -> io::Result<()> {
         self.remaining = self
             .remaining
             .checked_sub(text.len() as u64)
