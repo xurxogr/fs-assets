@@ -16,5 +16,4 @@ pub mod import_resolution;
 pub mod localization;
 pub mod pipeline;
 pub mod stockpile_classifier;
-pub mod type_processing;
 pub mod utils;
