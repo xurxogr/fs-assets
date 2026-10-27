@@ -105,7 +105,9 @@ fn extract_catalog_data_impl(
     catalog_data.insert("ObjectPath".to_string(), json!(object_path));
 
     // Step 2: ParentBlueprint via ClassIndex(-by-name) -> SuperIndex chain.
-    let parent_path = resolve_parent_blueprint(default_export, exports, imports);
+    // Adapted once per asset: every import lookup below reads this shape.
+    let imports: Vec<Value> = imports.iter().map(to_pascalcase_import).collect();
+    let parent_path = resolve_parent_blueprint(default_export, exports, &imports);
     if let Some(ref p) = parent_path {
         catalog_data.insert("ParentBlueprint".to_string(), json!(p));
     }
@@ -119,12 +121,12 @@ fn extract_catalog_data_impl(
         _ => return Some(Value::Object(catalog_data)),
     };
 
-    let processed_imports = process_imports(imports);
+    let processed_imports = process_imports(&imports);
     let extracted = process_data(
         properties,
         &processed_imports,
         exports,
-        imports,
+        &imports,
         full_extraction,
     );
     if let Value::Object(extracted_map) = extracted {
@@ -213,17 +215,16 @@ fn resolve_parent_blueprint(
         return None;
     }
 
-    let import_idx = (-super_index - 1) as usize;
-    let import_obj = imports.get(import_idx)?;
-    resolve_import_full_path_adapted(import_obj, imports)
+    let import_obj = imports.get(usize::try_from(super_index.unsigned_abs() - 1).ok()?)?;
+    import_resolution::resolve_import_full_path(import_obj, imports)
 }
 
-/// Resolve each raw import to a blueprint path (`None` for anything that
-/// isn't a `BlueprintGeneratedClass` under a `/Game/` package).
+/// Resolve each (adapted) import to a blueprint path (`None` for anything
+/// that isn't a `BlueprintGeneratedClass` under a `/Game/` package).
 fn process_imports(imports: &[Value]) -> Vec<Option<String>> {
     imports
         .iter()
-        .map(|imp| resolve_import_full_path_adapted(imp, imports))
+        .map(|imp| import_resolution::resolve_import_full_path(imp, imports))
         .collect()
 }
 
@@ -232,25 +233,14 @@ fn process_imports(imports: &[Value]) -> Vec<Option<String>> {
 /// functions operate on the PascalCase shape (`ObjectName`, `ClassName`,
 /// `OuterIndex`). Rather than re-deriving that
 /// (already-tested) resolution logic against the new field names, adapt the
-/// value shape and delegate to it directly.
+/// value shape and delegate to it directly. Done once per asset, in
+/// `extract_catalog_data_impl`: each resolution reads the whole array.
 fn to_pascalcase_import(import_obj: &Value) -> Value {
     json!({
         "ClassName": import_obj.get("class_name").cloned().unwrap_or(Value::Null),
         "ObjectName": import_obj.get("object_name").cloned().unwrap_or(Value::Null),
         "OuterIndex": import_obj.get("outer_index").cloned().unwrap_or(json!(0)),
     })
-}
-
-fn resolve_import_full_path_adapted(import_obj: &Value, all_imports: &[Value]) -> Option<String> {
-    let adapted = to_pascalcase_import(import_obj);
-    let adapted_all: Vec<Value> = all_imports.iter().map(to_pascalcase_import).collect();
-    import_resolution::resolve_import_full_path(&adapted, &adapted_all)
-}
-
-fn resolve_import_asset_path_adapted(import_obj: &Value, all_imports: &[Value]) -> Option<String> {
-    let adapted = to_pascalcase_import(import_obj);
-    let adapted_all: Vec<Value> = all_imports.iter().map(to_pascalcase_import).collect();
-    import_resolution::resolve_import_asset_path(&adapted, &adapted_all)
 }
 
 /// A processed value is worth keeping in "simple" (non-full-extraction) mode
@@ -269,14 +259,15 @@ fn is_nonempty(value: &Value) -> bool {
 /// (a `properties`-shaped value) to import paths / export names.
 ///
 /// `processed_imports` is this asset's `imports` array pre-resolved to
-/// blueprint paths (or `None`); `exports`/`raw_imports` are the raw arrays,
-/// used only in `full_extraction` mode to resolve export references to
-/// object names and to fall back to non-blueprint asset-path resolution.
+/// blueprint paths (or `None`); `exports` is the raw exports array and
+/// `imports` the imports adapted by [`to_pascalcase_import`], both used only
+/// in `full_extraction` mode to resolve export references to object names
+/// and to fall back to non-blueprint asset-path resolution.
 fn process_data(
     data: &Value,
     processed_imports: &[Option<String>],
     exports: &[Value],
-    raw_imports: &[Value],
+    imports: &[Value],
     full_extraction: bool,
 ) -> Value {
     match data {
@@ -288,20 +279,15 @@ fn process_data(
                         ref_idx,
                         processed_imports,
                         exports,
-                        raw_imports,
+                        imports,
                         full_extraction,
                         |v| {
                             result.insert(key.clone(), v);
                         },
                     );
                 } else if matches!(value, Value::Object(_) | Value::Array(_)) {
-                    let processed = process_data(
-                        value,
-                        processed_imports,
-                        exports,
-                        raw_imports,
-                        full_extraction,
-                    );
+                    let processed =
+                        process_data(value, processed_imports, exports, imports, full_extraction);
                     if full_extraction {
                         result.insert(key.clone(), simplify_value(&processed));
                     } else if is_nonempty(&processed) {
@@ -326,18 +312,13 @@ fn process_data(
                         ref_idx,
                         processed_imports,
                         exports,
-                        raw_imports,
+                        imports,
                         full_extraction,
                         |v| result.push(v),
                     );
                 } else if matches!(item, Value::Object(_) | Value::Array(_)) {
-                    let processed = process_data(
-                        item,
-                        processed_imports,
-                        exports,
-                        raw_imports,
-                        full_extraction,
-                    );
+                    let processed =
+                        process_data(item, processed_imports, exports, imports, full_extraction);
                     // Note: unlike the dict branch, simplify_value is
                     // deliberately not applied here.
                     if full_extraction || is_nonempty(&processed) {
@@ -363,7 +344,7 @@ fn resolve_reference_into(
     ref_idx: i64,
     processed_imports: &[Option<String>],
     exports: &[Value],
-    raw_imports: &[Value],
+    imports: &[Value],
     full_extraction: bool,
     mut emit: impl FnMut(Value),
 ) {
@@ -375,8 +356,9 @@ fn resolve_reference_into(
         if let Some(Some(path)) = processed_imports.get(idx) {
             emit(json!(path));
         } else if full_extraction {
-            if let Some(raw_import) = raw_imports.get(idx) {
-                if let Some(asset_path) = resolve_import_asset_path_adapted(raw_import, raw_imports)
+            if let Some(import_obj) = imports.get(idx) {
+                if let Some(asset_path) =
+                    import_resolution::resolve_import_asset_path(import_obj, imports)
                 {
                     emit(json!(asset_path));
                 }
