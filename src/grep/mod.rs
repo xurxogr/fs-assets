@@ -7,6 +7,11 @@
 //! decode/encode. Unreal only stores a string single-byte when it is pure
 //! ASCII (anything else goes out as UTF-16), so an ASCII `pattern` is
 //! searched in both byte representations and any other only as UTF-16LE.
+//!
+//! A UTF-16LE match may start at any byte offset, odd ones included: an
+//! `FString` sits right after whatever was serialized before it, with no
+//! alignment, so about half of a cooked asset's strings start at an odd
+//! offset.
 
 use std::path::{Path, PathBuf};
 
@@ -112,6 +117,25 @@ fn contains_bytes(haystack: &[u8], needle: &Finder<'_>) -> bool {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn finds_a_utf16_match_at_an_odd_offset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("Odd.uasset");
+        let mut bytes: Vec<u8> = b"odd".to_vec();
+        bytes.extend("Wärden".encode_utf16().flat_map(|u| u.to_le_bytes()));
+        fs::write(&path, bytes).unwrap();
+
+        let matches = search_content_dir(tmp.path(), "Wärden").unwrap();
+
+        assert_eq!(
+            matches,
+            vec![GrepMatch {
+                path,
+                encoding: Encoding::Utf16Le
+            }]
+        );
+    }
 
     #[test]
     fn finds_ascii_and_utf16_matches_in_separate_files() {
