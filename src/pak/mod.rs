@@ -248,41 +248,68 @@ pub(crate) fn contained_path(output_dir: &Path, entry: &str) -> anyhow::Result<P
 /// `"../../../"` and `Version::V8B`, the values of the game's own
 /// `War-WindowsNoEditor.pak`. Returns every packed file's path, relative to
 /// `input_dir` with `/` separators, sorted for stable output. A directory
-/// that can't be read (or a missing `input_dir`) fails the whole pack, before
-/// `output` is created, rather than producing a pak missing its files.
+/// that can't be read (or a missing `input_dir`), or a file name that isn't
+/// UTF-8 (pak paths are text), fails the whole pack before `output` is
+/// touched, rather than producing a pak missing or misnaming its files.
+///
+/// The pak is written to a temporary file next to `output` and renamed over
+/// it only once complete, so a failed pack leaves an existing `output` as it
+/// was. An `output` inside `input_dir` (re-running `pack mod -o mod/X.pak`)
+/// isn't packed into itself.
 pub fn pack(
     input_dir: &Path,
     output: &Path,
     mount_point: &str,
     version: repak::Version,
 ) -> anyhow::Result<Vec<String>> {
-    let entries = walkdir::WalkDir::new(input_dir)
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
-    let file = File::create(output)?;
-    let mut writer =
-        PakBuilder::new().writer(BufWriter::new(file), version, mount_point.to_string(), None);
-
-    let mut written = Vec::new();
-    for entry in entries {
-        if !entry.file_type().is_file() {
+    let output_file = output.canonicalize().ok();
+    let mut files = Vec::new();
+    for entry in walkdir::WalkDir::new(input_dir) {
+        let entry = entry?;
+        if !entry.file_type().is_file()
+            || output_file.is_some() && entry.path().canonicalize().ok() == output_file
+        {
             continue;
         }
         let rel = entry.path().strip_prefix(input_dir)?;
         // repak paths always use `/`, even on Windows hosts.
         let rel_str = rel
             .components()
-            .map(|c| c.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>()
+            .map(|c| {
+                c.as_os_str().to_str().ok_or_else(|| {
+                    anyhow::anyhow!("{} is not a UTF-8 file name", entry.path().display())
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?
             .join("/");
-        let data = fs::read(entry.path())?;
+        files.push((entry.into_path(), rel_str));
+    }
+
+    let parent = match output.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let mut temp = tempfile::Builder::new()
+        .suffix(".pak.tmp")
+        .tempfile_in(parent)?;
+    let mut writer = PakBuilder::new().writer(
+        BufWriter::new(temp.as_file_mut()),
+        version,
+        mount_point.to_string(),
+        None,
+    );
+
+    let mut written = Vec::new();
+    for (path, rel_str) in files {
+        let data = fs::read(&path)?;
         writer
             .write_file(&rel_str, false, data)
             .map_err(|e| anyhow::anyhow!("failed to write {rel_str}: {e}"))?;
         written.push(rel_str);
     }
 
-    writer.write_index()?;
+    writer.write_index()?.flush()?;
+    temp.persist(output)?;
     written.sort();
     Ok(written)
 }
@@ -668,5 +695,49 @@ mod tests {
         )
         .is_err());
         assert!(!pak_path.exists());
+    }
+
+    #[test]
+    fn repacking_into_the_input_dir_skips_the_previous_pak() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input_dir = tmp.path().join("mod");
+        fs::create_dir_all(&input_dir).unwrap();
+        fs::write(input_dir.join("a.txt"), b"hello").unwrap();
+        let pak_path = input_dir.join("Mod.pak");
+
+        for _ in 0..2 {
+            let written = pack(&input_dir, &pak_path, "../../../", repak::Version::V8B).unwrap();
+            assert_eq!(written, vec!["a.txt".to_string()]);
+        }
+        assert_eq!(list(&pak_path).unwrap(), vec!["a.txt".to_string()]);
+        let leftovers: Vec<_> = fs::read_dir(&input_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(leftovers.len(), 2, "{leftovers:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_pack_leaves_the_existing_pak_alone() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let input_dir = tmp.path().join("mod");
+        fs::create_dir_all(&input_dir).unwrap();
+        fs::write(input_dir.join("a.txt"), b"hello").unwrap();
+        let pak_path = tmp.path().join("out.pak");
+        pack(&input_dir, &pak_path, "../../../", repak::Version::V8B).unwrap();
+        let before = fs::read(&pak_path).unwrap();
+
+        fs::write(
+            input_dir.join(std::ffi::OsStr::from_bytes(b"bad\xff.txt")),
+            b"x",
+        )
+        .unwrap();
+        let err = pack(&input_dir, &pak_path, "../../../", repak::Version::V8B).unwrap_err();
+        assert!(err.to_string().contains("not a UTF-8 file name"), "{err}");
+        assert_eq!(fs::read(&pak_path).unwrap(), before);
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 2);
     }
 }
