@@ -1050,22 +1050,12 @@ fn decode_compressed_mip0(path: &Path) -> anyhow::Result<Vec<u8>> {
 /// `sig + Len` in bounds, and the PNG actually ends with `IEND` at that
 /// exact position) before it's accepted.
 pub fn uasset_to_png(path: &Path) -> anyhow::Result<Vec<u8>> {
-    // Best-effort only: `Asset::new` succeeding is *not* a precondition for
-    // extracting the embedded PNG below (that reads raw file bytes and
-    // doesn't touch anything unreal_asset parsed), so a parse failure here
-    // is deliberately swallowed rather than propagated. In practice one of
-    // the three real fixtures this was tested against
-    // (`ResearchPartIcon.uasset`) fails to fully parse via `unreal_asset`
-    // at all (`Error: failed to fill whole buffer`, i.e. some property or
-    // section it doesn't understand runs it past EOF) yet still yields a
-    // perfectly good embedded PNG once read this way — worth knowing if
-    // this function's error path ever needs a stricter validation step.
-    let attempt_path = path.to_path_buf();
-    let _ = catch_unwind_quietly(move || {
-        let file = BufReader::new(File::open(&attempt_path)?);
-        Asset::new(file, None, ENGINE_VERSION)
-    });
-
+    // The embedded-PNG scan reads raw file bytes and never needs
+    // `unreal_asset` to parse the file: one of the three real fixtures it was
+    // tested against (`ResearchPartIcon.uasset`) fails to fully parse via
+    // `unreal_asset` at all (`Error: failed to fill whole buffer`) yet still
+    // yields a perfectly good embedded PNG this way — worth knowing if this
+    // function's error path ever needs a stricter validation step.
     let file_bytes = std::fs::read(path)?;
 
     for sig_offset in find_png_magic_offsets(&file_bytes) {
