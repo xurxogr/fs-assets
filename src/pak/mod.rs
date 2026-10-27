@@ -342,6 +342,24 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_footer_index_size_past_the_file() {
+        let mut pak = build_test_pak();
+        // Footer: magic, version, index offset, index size.
+        let magic = pak
+            .windows(4)
+            .rposition(|w| w == 0x5A6F12E1u32.to_le_bytes())
+            .unwrap();
+        let index_size = magic + 4 + 4 + 8;
+        pak[index_size..index_size + 8].copy_from_slice(&(1u64 << 40).to_le_bytes());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let pak_path = tmp.path().join("corrupt.pak");
+        fs::write(&pak_path, pak).unwrap();
+
+        assert!(list(&pak_path).is_err());
+    }
+
+    #[test]
     fn contained_path_keeps_plain_entries_under_the_output_dir() {
         let out = Path::new("out");
         assert_eq!(
