@@ -71,11 +71,6 @@ pub fn resolve_import_asset_path(import_obj: &Value, all_imports: &[Value]) -> O
     None
 }
 
-/// Process an import: returns the full path for blueprints, `None` for others.
-pub fn process_import(data: &Value, all_imports: &[Value]) -> Option<String> {
-    resolve_import_full_path(data, all_imports)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,26 +151,6 @@ mod tests {
         fn out_of_range_outer_index_returns_none() {
             let import_obj = json!({"ClassName": "Texture2D", "OuterIndex": -5});
             assert_eq!(resolve_import_asset_path(&import_obj, &[]), None);
-        }
-    }
-
-    mod process_import_tests {
-        use super::*;
-
-        #[test]
-        fn delegates_to_resolve_import_full_path() {
-            let all_imports = vec![json!({"ObjectName": "/Game/Blueprints/Items/BPFoo"})];
-            let data = json!({"ClassName": "BlueprintGeneratedClass", "OuterIndex": -1});
-            assert_eq!(
-                process_import(&data, &all_imports),
-                Some("/Game/Blueprints/Items/BPFoo".to_string())
-            );
-        }
-
-        #[test]
-        fn non_blueprint_returns_none() {
-            let data = json!({"ClassName": "Texture2D", "OuterIndex": -1});
-            assert_eq!(process_import(&data, &[]), None);
         }
     }
 }
