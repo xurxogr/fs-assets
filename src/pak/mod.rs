@@ -7,9 +7,7 @@ use repak::PakBuilder;
 /// Lists every file path recorded in `pak`'s index.
 pub fn list(pak: &Path) -> anyhow::Result<Vec<String>> {
     let mut file = BufReader::new(File::open(pak)?);
-    let reader = PakBuilder::new()
-        .reader(&mut file)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let reader = PakBuilder::new().reader(&mut file)?;
     let mut files = reader.files();
     files.sort();
     Ok(files)
@@ -70,9 +68,7 @@ where
     F: Fn(&str) -> bool,
 {
     let mut file = BufReader::new(File::open(pak)?);
-    let reader = PakBuilder::new()
-        .reader(&mut file)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let reader = PakBuilder::new().reader(&mut file)?;
 
     let wanted: Vec<String> = reader
         .files()
@@ -223,7 +219,7 @@ pub fn pack(
         written.push(rel_str);
     }
 
-    writer.write_index().map_err(|e| anyhow::anyhow!("{e}"))?;
+    writer.write_index()?;
     written.sort();
     Ok(written)
 }

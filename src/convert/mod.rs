@@ -188,7 +188,7 @@ fn catch_unwind_quietly<R>(f: impl FnOnce() -> R + UnwindSafe) -> std::thread::R
 fn parse_asset<C: Read + Seek + UnwindSafe>(reader: C, path: &Path) -> anyhow::Result<Asset<C>> {
     match catch_unwind_quietly(move || Asset::new(reader, None, ENGINE_VERSION)) {
         Ok(Ok(asset)) => Ok(asset),
-        Ok(Err(e)) => Err(anyhow::anyhow!("{e}")),
+        Ok(Err(e)) => Err(e.into()),
         Err(_) => Err(anyhow::anyhow!("panicked while parsing {}", path.display())),
     }
 }
