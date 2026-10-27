@@ -346,15 +346,10 @@ where
             output,
             full,
         } => {
-            let (entries, stats) = match asset_source(extract_dir, pak.into_iter().collect()) {
-                Some(AssetSource::ExtractDir(dir)) => {
-                    catalog::pipeline::build_catalog_from_extract_dir(&dir)?
-                }
-                Some(AssetSource::Pak(paks)) => match paks.as_slice() {
-                    [pak] => catalog::pipeline::build_catalog_from_pak(pak)?,
-                    _ => anyhow::bail!("build-catalog reads exactly one --pak"),
-                },
-                None => anyhow::bail!("either --extract-dir or --pak is required"),
+            let (entries, stats) = match (extract_dir, pak) {
+                (Some(dir), _) => catalog::pipeline::build_catalog_from_extract_dir(&dir)?,
+                (None, Some(pak)) => catalog::pipeline::build_catalog_from_pak(&pak)?,
+                (None, None) => anyhow::bail!("either --extract-dir or --pak is required"),
             };
             let entries = if full {
                 entries
