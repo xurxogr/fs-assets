@@ -366,6 +366,7 @@ pub fn add_mod_to_database_with_progress(
     if !extract_dir.exists() {
         anyhow::bail!("extraction directory not found: {}", extract_dir.display());
     }
+    let _lock = hdf5_writer::lock_database(output_path)?;
 
     let existing = if output_path.exists() {
         hdf5_writer::read_database(output_path)?
@@ -524,6 +525,7 @@ pub fn modify_icon_in_database(
 ) -> anyhow::Result<()> {
     database::check_template_name("code", &identity.code)?;
     database::check_template_name("mod name", &identity.mod_name)?;
+    let _lock = hdf5_writer::lock_database(output_path)?;
     let existing = if output_path.exists() {
         hdf5_writer::read_database(output_path)?
     } else {
@@ -1500,6 +1502,29 @@ mod tests {
                 false,
                 "vanilla",
             )
+        }
+
+        #[test]
+        fn a_database_another_run_is_updating_is_left_alone() {
+            let tmp = tempfile::tempdir().unwrap();
+            let output = tmp.path().join("out.h5");
+            let icon = tmp.path().join("rifle.png");
+            image::RgbaImage::from_pixel(64, 64, image::Rgba([200, 100, 50, 255]))
+                .save(&icon)
+                .unwrap();
+
+            let lock = hdf5_writer::lock_database(&output).unwrap();
+            let err =
+                modify_icon_in_database(&rifle(), Some(&icon), &[1080], false, false, &output)
+                    .unwrap_err();
+            assert!(err.to_string().contains("another run"), "{err}");
+            let err = add_mod_to_database(tmp.path(), &[], "vanilla", &output, None).unwrap_err();
+            assert!(err.to_string().contains("another run"), "{err}");
+            assert!(!output.exists());
+
+            drop(lock);
+            modify_icon_in_database(&rifle(), Some(&icon), &[1080], false, false, &output).unwrap();
+            assert!(output.exists());
         }
 
         #[test]

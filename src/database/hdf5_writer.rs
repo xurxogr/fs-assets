@@ -53,6 +53,43 @@ fn vlen(s: &str) -> anyhow::Result<VarLenUnicode> {
         .map_err(|e| anyhow::anyhow!("{s:?} can't be stored as an HDF5 string: {e}"))
 }
 
+/// An exclusive hold on updating the database at one path, released when
+/// dropped. See [`lock_database`].
+#[derive(Debug)]
+pub struct DatabaseLock {
+    _file: std::fs::File,
+}
+
+/// Takes the update lock of the database at `db_path`, failing at once if
+/// another run holds it. Updating is read, modify, write: two runs at once
+/// would each write back what they read, the last one dropping the other's
+/// changes. The lock is on `<db_path>.lock`, which is left in place, since the
+/// database itself is replaced on every write.
+pub fn lock_database(db_path: &Path) -> anyhow::Result<DatabaseLock> {
+    let mut lock_path = db_path.as_os_str().to_owned();
+    lock_path.push(".lock");
+    let lock_path = std::path::PathBuf::from(lock_path);
+    if let Some(parent) = lock_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(DatabaseLock { _file: file }),
+        Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(
+            "{} is being updated by another run (lock file {})",
+            db_path.display(),
+            lock_path.display()
+        ),
+        Err(std::fs::TryLockError::Error(e)) => {
+            Err(anyhow::Error::from(e).context(format!("failed to lock {}", lock_path.display())))
+        }
+    }
+}
+
 /// Writes a full template database (one group per resolution) to `output_path`,
 /// overwriting any existing file. `resolutions` maps a resolution height
 /// (e.g. `1080`) to the list of templates generated for it; an empty list
