@@ -745,13 +745,15 @@ fn version() -> &'static str {
 /// script accepts identical commands and parameters.
 ///
 /// Args:
-///     argv: Argument vector, typically `sys.argv`.
+///     argv: Argument vector, typically `sys.argv`. Arguments that aren't
+///         valid UTF-8 (which `sys.argv` holds as surrogate escapes) reach
+///         the parser as the original bytes, as they do the native binary.
 ///
 /// Returns:
 ///     Process exit code: 0 on success, 1 on error, and clap's code for
 ///     `--help`, `--version` (0) and bad arguments (2).
 #[pyfunction]
-fn cli_main(py: Python<'_>, argv: Vec<String>) -> i32 {
+fn cli_main(py: Python<'_>, argv: Vec<std::ffi::OsString>) -> i32 {
     // Python's own SIGINT handler only raises once Python code runs again,
     // which with the GIL released is after the whole command: Ctrl-C would
     // be ignored. The default handler ends the process at once, as Ctrl-C

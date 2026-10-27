@@ -11,6 +11,7 @@ import json
 import logging
 import signal
 import struct
+import sys
 import zlib
 from pathlib import Path
 
@@ -303,6 +304,13 @@ def test_cli_main_restores_the_sigint_handler(tmp_path):
     before = signal.getsignal(signal.SIGINT)
     assert fs_assets.cli_main(["fs-assets", "grep-strings", "x", str(tmp_path / "missing")]) == 1
     assert signal.getsignal(signal.SIGINT) is before
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX paths are bytes")
+def test_cli_main_accepts_arguments_that_are_not_utf8(tmp_path):
+    # How `sys.argv` holds a non-UTF-8 byte: a surrogate escape.
+    missing = str(tmp_path) + "/missing-\udcff"
+    assert fs_assets.cli_main(["fs-assets", "grep-strings", "x", missing]) == 1
 
 
 def test_cli_main_returns_instead_of_exiting_on_help_and_bad_arguments(capsys):
