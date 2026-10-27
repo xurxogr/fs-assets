@@ -312,7 +312,9 @@ impl LocalizationLookup {
             }
 
             for path in read_dir_or_warn(&lang_dir) {
-                if path.extension().and_then(|e| e.to_str()) != Some("locres") {
+                if path.extension().and_then(|e| e.to_str()) != Some("locres")
+                    || crate::pak::real_file_under(&self.localization_dir, path.clone()).is_none()
+                {
                     continue;
                 }
 

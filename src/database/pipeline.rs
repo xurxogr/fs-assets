@@ -68,7 +68,7 @@ fn resolve_icon_file(dir: &Path, icon_path: &str) -> Option<PathBuf> {
         return None;
     }
     let candidate = crate::pak::contained_path(dir, &format!("{icon_path}.uasset")).ok()?;
-    candidate.exists().then_some(candidate)
+    crate::pak::real_file_under(dir, candidate)
 }
 
 /// Resolves a catalog `icon_path` (e.g. `War/Content/Textures/UI/ItemIcons/T_Rifle`,

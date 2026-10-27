@@ -437,7 +437,7 @@ pub fn filesystem_loader(blueprints_dir: &Path) -> impl Fn(&str) -> Option<Value
     move |object_path: &str| {
         let candidate = blueprint_candidate(blueprints_dir, object_path)?;
         let resolved = find_blueprint_path(blueprints_dir, &candidate)?;
-        load_full_json(&resolved)
+        load_full_json(blueprints_dir, &resolved)
     }
 }
 

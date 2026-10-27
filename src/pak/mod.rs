@@ -102,6 +102,12 @@ where
     let mut extracted = Vec::with_capacity(total);
     for path in wanted {
         let dest = contained_path(output_dir, &path)?;
+        if has_symlink_below(output_dir, &dest) {
+            anyhow::bail!(
+                "{path} would be written through a symlink in {}",
+                output_dir.display()
+            );
+        }
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -159,6 +165,35 @@ impl<W: Write> Write for CappedWriter<W> {
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
     }
+}
+
+/// Whether reaching `path` from `root` goes through a symlink: any existing
+/// component below `root` (`root` itself may be one) that is a link. A link
+/// in a directory the user hands in — an extraction directory, `unpak`'s
+/// output — could otherwise point reads or writes anywhere on the system,
+/// which [`contained_path`]'s purely textual check can't see. A `path` not
+/// under `root` counts as one, to fail closed.
+pub(crate) fn has_symlink_below(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return true;
+    };
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return true,
+            Ok(_) => {}
+            // Nothing exists from here on, so nothing below can be a link.
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+/// `path` under `root` if it is a regular file reached without following a
+/// symlink below `root` (see [`has_symlink_below`]).
+pub(crate) fn real_file_under(root: &Path, path: PathBuf) -> Option<PathBuf> {
+    (!has_symlink_below(root, &path) && path.is_file()).then_some(path)
 }
 
 /// Whether `name` is usable as a file or directory name on Windows too: not
@@ -423,6 +458,56 @@ mod tests {
             &mut budget.clone(),
         );
         assert_eq!(ok.unwrap(), vec!["small.txt".to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_file_under_refuses_links_below_the_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.uasset"), b"x").unwrap();
+        let root = tmp.path().join("root");
+        fs::create_dir_all(root.join("War")).unwrap();
+        fs::write(root.join("War/real.uasset"), b"x").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("War/Linked")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.uasset"), root.join("War/file.uasset"))
+            .unwrap();
+
+        let real = root.join("War/real.uasset");
+        assert_eq!(real_file_under(&root, real.clone()), Some(real));
+        assert_eq!(
+            real_file_under(&root, root.join("War/Linked/secret.uasset")),
+            None
+        );
+        assert_eq!(real_file_under(&root, root.join("War/file.uasset")), None);
+        assert_eq!(real_file_under(&root, outside.join("secret.uasset")), None);
+        assert_eq!(
+            real_file_under(&root, root.join("War/missing.uasset")),
+            None
+        );
+
+        // A symlinked root itself is fine: only links below it count.
+        let linked_root = tmp.path().join("linked_root");
+        std::os::unix::fs::symlink(&root, &linked_root).unwrap();
+        assert!(real_file_under(&linked_root, linked_root.join("War/real.uasset")).is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_refuses_to_write_through_a_symlink_in_the_output_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pak_path = tmp.path().join("test.pak");
+        fs::write(&pak_path, build_pak_with(&["War/escape.txt"])).unwrap();
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        let out_dir = tmp.path().join("out");
+        fs::create_dir_all(&out_dir).unwrap();
+        std::os::unix::fs::symlink(&outside, out_dir.join("War")).unwrap();
+
+        let err = extract(&pak_path, None, &out_dir).unwrap_err();
+        assert!(err.to_string().contains("symlink"), "{err}");
+        assert!(!outside.join("escape.txt").exists());
     }
 
     #[test]

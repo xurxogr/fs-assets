@@ -354,7 +354,7 @@ pub fn get_production_categories<'a>(
 /// `crate::convert::uasset_to_full_json`. Returns `None` if the file doesn't
 /// exist or fails to parse (the latter with a warning).
 pub fn filesystem_data_loader(data_dir: &Path) -> impl Fn(&str) -> Option<Value> + '_ {
-    move |table_name: &str| load_full_json(&data_dir.join(format!("{table_name}.uasset")))
+    move |table_name: &str| load_full_json(data_dir, &data_dir.join(format!("{table_name}.uasset")))
 }
 
 /// Builds a filesystem-backed
@@ -366,7 +366,12 @@ pub fn filesystem_data_loader(data_dir: &Path) -> impl Fn(&str) -> Option<Value>
 /// `crate::convert::uasset_to_full_json`. Returns `None` if the file doesn't
 /// exist or fails to parse (the latter with a warning).
 pub fn filesystem_blueprint_loader(blueprints_dir: &Path) -> impl Fn(&str) -> Option<Value> + '_ {
-    move |relative: &str| load_full_json(&blueprints_dir.join(format!("{relative}.uasset")))
+    move |relative: &str| {
+        load_full_json(
+            blueprints_dir,
+            &blueprints_dir.join(format!("{relative}.uasset")),
+        )
+    }
 }
 
 #[cfg(test)]

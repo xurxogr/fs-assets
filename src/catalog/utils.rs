@@ -4,15 +4,15 @@ use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
-/// `path` parsed via `crate::convert::uasset_to_full_json`, for the
-/// catalog's filesystem loaders: `None` if it doesn't exist, and also `None`
-/// (reported as a warning, since the catalog then comes out without that
-/// asset's data) if it exists but fails to parse.
-pub(crate) fn load_full_json(path: &Path) -> Option<Value> {
-    if !path.exists() {
-        return None;
-    }
-    crate::convert::uasset_to_full_json(path)
+/// `path`, somewhere under `root`, parsed via
+/// `crate::convert::uasset_to_full_json`, for the catalog's filesystem
+/// loaders: `None` if it doesn't exist or is reached through a symlink below
+/// `root` (see `crate::pak::has_symlink_below`), and also `None` (reported as
+/// a warning, since the catalog then comes out without that asset's data) if
+/// it exists but fails to parse.
+pub(crate) fn load_full_json(root: &Path, path: &Path) -> Option<Value> {
+    let path = crate::pak::real_file_under(root, path.to_path_buf())?;
+    crate::convert::uasset_to_full_json(&path)
         .map_err(|e| eprintln!("build-catalog: failed to parse {}: {e}", path.display()))
         .ok()
 }
@@ -210,7 +210,10 @@ mod tests {
         #[test]
         fn missing_file_is_none() {
             let tmp = tempfile::tempdir().unwrap();
-            assert_eq!(load_full_json(&tmp.path().join("Missing.uasset")), None);
+            assert_eq!(
+                load_full_json(tmp.path(), &tmp.path().join("Missing.uasset")),
+                None
+            );
         }
 
         #[test]
@@ -218,7 +221,7 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let path = tmp.path().join("Broken.uasset");
             std::fs::write(&path, b"not an asset").unwrap();
-            assert_eq!(load_full_json(&path), None);
+            assert_eq!(load_full_json(tmp.path(), &path), None);
         }
     }
 
