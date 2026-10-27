@@ -286,6 +286,20 @@ def test_read_templates_rejects_an_unsupported_resolution(tmp_path):
         fs_assets.read_templates(str(db), 1234)
 
 
+def test_path_arguments_accept_pathlib_paths(tmp_path):
+    db = tmp_path / "database.h5"
+    icon = _png(tmp_path / "rifle.png", 64, 64, (200, 100, 50, 255))
+
+    fs_assets.modify_icon(
+        db, code="Rifle", faction="wardens", category="item", icon=icon, resolution=[1080]
+    )
+
+    assert len(fs_assets.read_templates(db, 1080)) == 1
+    assert fs_assets.database_statistics(db)["mods"] == {"vanilla": {1080: 1}}
+    coverage = fs_assets.pak_coverage(catalog=_catalog(tmp_path), pak=[_icon_mod_pak(tmp_path)])
+    assert coverage["main_icons_found"] == 1
+
+
 def test_pak_coverage_counts_catalog_icons(tmp_path):
     coverage = fs_assets.pak_coverage(
         catalog=str(_catalog(tmp_path)), pak=[str(_icon_mod_pak(tmp_path))]

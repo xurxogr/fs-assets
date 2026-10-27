@@ -1,7 +1,11 @@
 """Types of the values the ``fs_assets`` functions take and return."""
 
+import os
 from collections.abc import Callable
 from typing import Literal, TypeAlias, TypedDict
+
+#: A filesystem path, as every path argument takes it.
+StrPath: TypeAlias = str | os.PathLike[str]
 
 #: Faction names, as ``modify_icon`` takes them and ``read_templates`` returns them.
 Faction: TypeAlias = Literal["neutral", "colonials", "wardens"]

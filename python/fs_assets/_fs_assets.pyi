@@ -15,6 +15,7 @@ from fs_assets.types import (
     PakVersion,
     ProgressCallback,
     StringMatch,
+    StrPath,
     Template,
 )
 
@@ -37,31 +38,31 @@ __all__ = [
     "cli_main",
 ]
 
-def unpak(pak: str, output: str, *, include: str | None = None) -> list[str]: ...
-def convert_to_json(path: str) -> dict[str, Any]: ...
-def convert_to_png(path: str) -> bytes: ...
+def unpak(pak: StrPath, output: StrPath, *, include: str | None = None) -> list[str]: ...
+def convert_to_json(path: StrPath) -> dict[str, Any]: ...
+def convert_to_png(path: StrPath) -> bytes: ...
 def build_catalog(
-    extract_dir: str | None = None,
-    output: str = "catalog.json",
+    extract_dir: StrPath | None = None,
+    output: StrPath = "catalog.json",
     full: bool = False,
     *,
-    pak: str | None = None,
+    pak: StrPath | None = None,
     progress: ProgressCallback | None = None,
 ) -> CatalogStats: ...
 def add_mod(
-    extract_dir: str | None = None,
+    extract_dir: StrPath | None = None,
     *,
-    catalog: str,
-    pak: str | Sequence[str] | None = None,
-    db: str = "database.h5",
+    catalog: StrPath,
+    pak: StrPath | Sequence[StrPath] | None = None,
+    db: StrPath = "database.h5",
     mod_name: str = "vanilla",
-    vanilla_extract_dir: str | None = None,
-    vanilla_pak: str | None = None,
+    vanilla_extract_dir: StrPath | None = None,
+    vanilla_pak: StrPath | None = None,
     resolution: Sequence[int] | None = None,
     progress: ProgressCallback | None = None,
 ) -> DatabaseBuildStats: ...
 def modify_icon(
-    db: str = "database.h5",
+    db: StrPath = "database.h5",
     *,
     code: str,
     faction: Faction,
@@ -69,28 +70,34 @@ def modify_icon(
     crated: bool = False,
     mod_name: str = "vanilla",
     resolution: Sequence[int] | None = None,
-    icon: str | None = None,
+    icon: StrPath | None = None,
     replace: bool = False,
     remove: bool = False,
 ) -> None: ...
 def extract_icons(
-    extract_dir: str | None = None,
+    extract_dir: StrPath | None = None,
     *,
-    catalog: str,
-    output: str,
-    pak: str | Sequence[str] | None = None,
+    catalog: StrPath,
+    output: StrPath,
+    pak: StrPath | Sequence[StrPath] | None = None,
     subicons: bool = True,
-    vanilla_extract_dir: str | None = None,
-    vanilla_pak: str | None = None,
+    vanilla_extract_dir: StrPath | None = None,
+    vanilla_pak: StrPath | None = None,
 ) -> ExtractIconsStats: ...
-def pak_coverage(*, catalog: str, pak: str | Sequence[str]) -> PakCoverage: ...
-def read_templates(db: str, resolution: int) -> list[Template]: ...
-def database_statistics(db: str) -> DatabaseStatistics: ...
+def pak_coverage(*, catalog: StrPath, pak: StrPath | Sequence[StrPath]) -> PakCoverage: ...
+def read_templates(db: StrPath, resolution: int) -> list[Template]: ...
+def database_statistics(db: StrPath) -> DatabaseStatistics: ...
 def pack(
-    input: str, output: str, *, mount_point: str = "../../../", version: PakVersion = "v8b"
+    input: StrPath,
+    output: StrPath,
+    *,
+    mount_point: str = "../../../",
+    version: PakVersion = "v8b",
 ) -> list[str]: ...
-def locres_dump(input: str, output: str, *, reference: str | None = None) -> LocresDumpStats: ...
-def locres_pack(input: str, output: str) -> None: ...
-def grep_strings(pattern: str, content_dir: str) -> list[StringMatch]: ...
+def locres_dump(
+    input: StrPath, output: StrPath, *, reference: StrPath | None = None
+) -> LocresDumpStats: ...
+def locres_pack(input: StrPath, output: StrPath) -> None: ...
+def grep_strings(pattern: str, content_dir: StrPath) -> list[StringMatch]: ...
 def version() -> str: ...
 def cli_main(argv: list[str]) -> int: ...

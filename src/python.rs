@@ -110,18 +110,19 @@ impl PyProgress {
     }
 }
 
-/// One `.pak` path, or several in override order (later ones win).
+/// One `.pak` path, or several in override order (later ones win). Like
+/// every path argument here, each is a `str` or an `os.PathLike`.
 #[derive(FromPyObject)]
 enum PakPaths {
-    One(String),
-    Many(Vec<String>),
+    One(PathBuf),
+    Many(Vec<PathBuf>),
 }
 
 impl PakPaths {
     fn into_paths(self) -> Vec<PathBuf> {
         match self {
-            PakPaths::One(path) => vec![PathBuf::from(path)],
-            PakPaths::Many(paths) => paths.into_iter().map(PathBuf::from).collect(),
+            PakPaths::One(path) => vec![path],
+            PakPaths::Many(paths) => paths,
         }
     }
 }
@@ -130,7 +131,7 @@ impl PakPaths {
 /// keyword arguments, rejecting both being given at once.
 fn asset_source(
     dir_name: &str,
-    dir: Option<&str>,
+    dir: Option<PathBuf>,
     pak_name: &str,
     paks: Vec<PathBuf>,
 ) -> PyResult<Option<AssetSource>> {
@@ -138,7 +139,7 @@ fn asset_source(
         (Some(_), false) => Err(PyErr::new::<PyValueError, _>(format!(
             "{dir_name} and {pak_name} are mutually exclusive"
         ))),
-        (Some(dir), true) => Ok(Some(AssetSource::ExtractDir(PathBuf::from(dir)))),
+        (Some(dir), true) => Ok(Some(AssetSource::ExtractDir(dir))),
         (None, false) => Ok(Some(AssetSource::Pak(paks))),
         (None, true) => Ok(None),
     }
@@ -162,8 +163,13 @@ fn write_json<T: serde::Serialize + ?Sized>(path: &Path, value: &T) -> PyResult<
 ///     List of extracted file paths (relative to `output`).
 #[pyfunction]
 #[pyo3(signature = (pak, output, *, include=None))]
-fn unpak(py: Python<'_>, pak: &str, output: &str, include: Option<&str>) -> PyResult<Vec<String>> {
-    py.detach(|| crate::pak::extract(Path::new(pak), include, Path::new(output)))
+fn unpak(
+    py: Python<'_>,
+    pak: PathBuf,
+    output: PathBuf,
+    include: Option<&str>,
+) -> PyResult<Vec<String>> {
+    py.detach(|| crate::pak::extract(&pak, include, &output))
         .map_err(to_py_err)
 }
 
@@ -175,9 +181,9 @@ fn unpak(py: Python<'_>, pak: &str, output: &str, include: Option<&str>) -> PyRe
 /// Returns:
 ///     Parsed asset contents as a dict.
 #[pyfunction]
-fn convert_to_json(py: Python<'_>, path: &str) -> PyResult<Py<PyAny>> {
+fn convert_to_json(py: Python<'_>, path: PathBuf) -> PyResult<Py<PyAny>> {
     let value = py
-        .detach(|| convert::uasset_to_json(Path::new(path)))
+        .detach(|| convert::uasset_to_json(&path))
         .map_err(to_py_err)?;
     json_to_py(py, &value)
 }
@@ -190,8 +196,8 @@ fn convert_to_json(py: Python<'_>, path: &str) -> PyResult<Py<PyAny>> {
 /// Returns:
 ///     PNG-encoded image bytes.
 #[pyfunction]
-fn convert_to_png(py: Python<'_>, path: &str) -> PyResult<Vec<u8>> {
-    py.detach(|| convert::uasset_to_png(Path::new(path)))
+fn convert_to_png(py: Python<'_>, path: PathBuf) -> PyResult<Vec<u8>> {
+    py.detach(|| convert::uasset_to_png(&path))
         .map_err(to_py_err)
 }
 
@@ -215,16 +221,22 @@ fn convert_to_png(py: Python<'_>, path: &str) -> PyResult<Vec<u8>> {
 /// Returns:
 ///     Dict of build statistics (total_files, parsed, stockpilable, errors).
 #[pyfunction]
-#[pyo3(signature = (extract_dir=None, output="catalog.json", full=false, *, pak=None, progress=None))]
+#[pyo3(
+    signature = (
+        extract_dir=None, output=PathBuf::from("catalog.json"), full=false, *, pak=None,
+        progress=None,
+    ),
+    text_signature = "(extract_dir=None, output='catalog.json', full=False, *, pak=None, progress=None)"
+)]
 fn build_catalog(
     py: Python<'_>,
-    extract_dir: Option<&str>,
-    output: &str,
+    extract_dir: Option<PathBuf>,
+    output: PathBuf,
     full: bool,
-    pak: Option<&str>,
+    pak: Option<PathBuf>,
     progress: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let paks = pak.map(PathBuf::from).into_iter().collect();
+    let paks = pak.into_iter().collect();
     let source = asset_source("extract_dir", extract_dir, "pak", paks)?
         .ok_or_else(|| PyErr::new::<PyValueError, _>("one of extract_dir or pak is required"))?;
     let progress = PyProgress::new(progress);
@@ -249,7 +261,7 @@ fn build_catalog(
     } else {
         catalog::catalog_field_filter::filter_noise(&entries)
     };
-    write_json(Path::new(output), &entries)?;
+    write_json(&output, &entries)?;
 
     let stats_json = serde_json::json!({
         "total_files": stats.total_files,
@@ -297,20 +309,24 @@ fn build_catalog(
 /// Returns:
 ///     Dict of database build statistics.
 #[pyfunction]
-#[pyo3(signature = (
-    extract_dir=None, *, catalog, pak=None, db="database.h5", mod_name="vanilla",
-    vanilla_extract_dir=None, vanilla_pak=None, resolution=None, progress=None,
-))]
+#[pyo3(
+    signature = (
+        extract_dir=None, *, catalog, pak=None, db=PathBuf::from("database.h5"),
+        mod_name="vanilla", vanilla_extract_dir=None, vanilla_pak=None, resolution=None,
+        progress=None,
+    ),
+    text_signature = "(extract_dir=None, *, catalog, pak=None, db='database.h5', mod_name='vanilla', vanilla_extract_dir=None, vanilla_pak=None, resolution=None, progress=None)"
+)]
 #[allow(clippy::too_many_arguments)]
 fn add_mod(
     py: Python<'_>,
-    extract_dir: Option<&str>,
-    catalog: &str,
+    extract_dir: Option<PathBuf>,
+    catalog: PathBuf,
     pak: Option<PakPaths>,
-    db: &str,
+    db: PathBuf,
     mod_name: &str,
-    vanilla_extract_dir: Option<&str>,
-    vanilla_pak: Option<&str>,
+    vanilla_extract_dir: Option<PathBuf>,
+    vanilla_pak: Option<PathBuf>,
     resolution: Option<Vec<i32>>,
     progress: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
@@ -323,10 +339,10 @@ fn add_mod(
             "vanilla_extract_dir",
             vanilla_extract_dir,
             "vanilla_pak",
-            vanilla_pak.map(PathBuf::from).into_iter().collect(),
+            vanilla_pak.into_iter().collect(),
         )?,
-        catalog: PathBuf::from(catalog),
-        db: PathBuf::from(db),
+        catalog,
+        db,
         mod_name: mod_name.to_string(),
         resolutions: resolution.unwrap_or_default(),
     };
@@ -366,21 +382,24 @@ fn add_mod(
 ///     replace: Overwrite an existing matching template instead of erroring.
 ///     remove: Remove the matching template instead of adding one.
 #[pyfunction]
-#[pyo3(signature = (
-    db="database.h5", *, code, faction, category, crated=false, mod_name="vanilla",
-    resolution=None, icon=None, replace=false, remove=false,
-))]
+#[pyo3(
+    signature = (
+        db=PathBuf::from("database.h5"), *, code, faction, category, crated=false,
+        mod_name="vanilla", resolution=None, icon=None, replace=false, remove=false,
+    ),
+    text_signature = "(db='database.h5', *, code, faction, category, crated=False, mod_name='vanilla', resolution=None, icon=None, replace=False, remove=False)"
+)]
 #[allow(clippy::too_many_arguments)]
 fn modify_icon(
     py: Python<'_>,
-    db: &str,
+    db: PathBuf,
     code: &str,
     faction: &str,
     category: &str,
     crated: bool,
     mod_name: &str,
     resolution: Option<Vec<i32>>,
-    icon: Option<&str>,
+    icon: Option<PathBuf>,
     replace: bool,
     remove: bool,
 ) -> PyResult<()> {
@@ -397,11 +416,11 @@ fn modify_icon(
     py.detach(|| {
         database::pipeline::modify_icon_in_database(
             &identity,
-            icon.map(Path::new),
+            icon.as_deref(),
             &resolutions,
             replace,
             remove,
-            Path::new(db),
+            &db,
         )
     })
     .map_err(to_py_err)
@@ -421,13 +440,13 @@ fn modify_icon(
 #[pyo3(signature = (input, output, *, mount_point="../../../", version="v8b"))]
 fn pack(
     py: Python<'_>,
-    input: &str,
-    output: &str,
+    input: PathBuf,
+    output: PathBuf,
     mount_point: &str,
     version: &str,
 ) -> PyResult<Vec<String>> {
     let version = parse_pak_version(version)?;
-    py.detach(|| crate::pak::pack(Path::new(input), Path::new(output), mount_point, version))
+    py.detach(|| crate::pak::pack(&input, &output, mount_point, version))
         .map_err(to_py_err)
 }
 
@@ -446,13 +465,13 @@ fn pack(
 #[pyo3(signature = (input, output, *, reference=None))]
 fn locres_dump(
     py: Python<'_>,
-    input: &str,
-    output: &str,
-    reference: Option<&str>,
+    input: PathBuf,
+    output: PathBuf,
+    reference: Option<PathBuf>,
 ) -> PyResult<Py<PyAny>> {
     let namespaces = py.detach(|| -> PyResult<usize> {
-        let dumped = locres::dump(Path::new(input), reference.map(Path::new)).map_err(to_py_err)?;
-        write_json(Path::new(output), &dumped)?;
+        let dumped = locres::dump(&input, reference.as_deref()).map_err(to_py_err)?;
+        write_json(&output, &dumped)?;
         Ok(dumped.namespaces.len())
     })?;
 
@@ -467,13 +486,13 @@ fn locres_dump(
 ///     input: Path to the edited JSON translation file.
 ///     output: Path to write the `.locres` to.
 #[pyfunction]
-fn locres_pack(py: Python<'_>, input: &str, output: &str) -> PyResult<()> {
+fn locres_pack(py: Python<'_>, input: PathBuf, output: PathBuf) -> PyResult<()> {
     py.detach(|| {
-        let bytes = std::fs::read(input).map_err(io_err)?;
+        let bytes = std::fs::read(&input).map_err(io_err)?;
         let dump_doc: locres::DumpDocument = serde_json::from_slice(&bytes)
             .map_err(|e| PyErr::new::<PyRuntimeError, _>(e.to_string()))?;
         let doc = locres::pack(&dump_doc).map_err(to_py_err)?;
-        locres::write(&doc, Path::new(output)).map_err(to_py_err)
+        locres::write(&doc, &output).map_err(to_py_err)
     })
 }
 
@@ -489,9 +508,9 @@ fn locres_pack(py: Python<'_>, input: &str, output: &str) -> PyResult<()> {
 /// Returns:
 ///     List of dicts with `path` and `encoding` ("ascii" or "utf16le").
 #[pyfunction]
-fn grep_strings(py: Python<'_>, pattern: &str, content_dir: &str) -> PyResult<Py<PyAny>> {
+fn grep_strings(py: Python<'_>, pattern: &str, content_dir: PathBuf) -> PyResult<Py<PyAny>> {
     let matches = py
-        .detach(|| grep::search_content_dir(Path::new(content_dir), pattern))
+        .detach(|| grep::search_content_dir(&content_dir, pattern))
         .map_err(to_py_err)?;
     let matches_json: Vec<serde_json::Value> = matches
         .iter()
@@ -535,13 +554,13 @@ fn grep_strings(py: Python<'_>, pattern: &str, content_dir: &str) -> PyResult<Py
 #[allow(clippy::too_many_arguments)]
 fn extract_icons(
     py: Python<'_>,
-    extract_dir: Option<&str>,
-    catalog: &str,
-    output: &str,
+    extract_dir: Option<PathBuf>,
+    catalog: PathBuf,
+    output: PathBuf,
     pak: Option<PakPaths>,
     subicons: bool,
-    vanilla_extract_dir: Option<&str>,
-    vanilla_pak: Option<&str>,
+    vanilla_extract_dir: Option<PathBuf>,
+    vanilla_pak: Option<PathBuf>,
 ) -> PyResult<Py<PyAny>> {
     let paks = pak.map(PakPaths::into_paths).unwrap_or_default();
     let source = asset_source("extract_dir", extract_dir, "pak", paks)?
@@ -552,10 +571,10 @@ fn extract_icons(
             "vanilla_extract_dir",
             vanilla_extract_dir,
             "vanilla_pak",
-            vanilla_pak.map(PathBuf::from).into_iter().collect(),
+            vanilla_pak.into_iter().collect(),
         )?,
-        catalog: PathBuf::from(catalog),
-        output: PathBuf::from(output),
+        catalog,
+        output,
         subicons,
     };
     let stats = py
@@ -585,10 +604,10 @@ fn extract_icons(
 ///     fallback of `add_mod`.
 #[pyfunction]
 #[pyo3(signature = (*, catalog, pak))]
-fn pak_coverage(py: Python<'_>, catalog: &str, pak: PakPaths) -> PyResult<Py<PyAny>> {
+fn pak_coverage(py: Python<'_>, catalog: PathBuf, pak: PakPaths) -> PyResult<Py<PyAny>> {
     let paks = pak.into_paths();
     let coverage = py
-        .detach(|| crate::add_mod::pak_coverage(Path::new(catalog), &paks))
+        .detach(|| crate::add_mod::pak_coverage(&catalog, &paks))
         .map_err(to_py_err)?;
     let result = PyDict::new(py);
     result.set_item("main_icons_found", coverage.main_icons_found)?;
@@ -611,9 +630,9 @@ fn pak_coverage(py: Python<'_>, catalog: &str, pak: PakPaths) -> PyResult<Py<PyA
 ///     (`item`/`vehicle`/`shippable`/`invalid`), `crated`, `phash`, `size`
 ///     (side in pixels) and `image` (`size * size * 3` row-major BGR bytes).
 #[pyfunction]
-fn read_templates(py: Python<'_>, db: &str, resolution: i32) -> PyResult<Py<PyList>> {
+fn read_templates(py: Python<'_>, db: PathBuf, resolution: i32) -> PyResult<Py<PyList>> {
     let templates = py
-        .detach(|| database::hdf5_writer::read_resolution(Path::new(db), resolution))
+        .detach(|| database::hdf5_writer::read_resolution(&db, resolution))
         .map_err(to_py_err)?;
     let size = database::icon_size_for_resolution(resolution);
     let list = PyList::empty(py);
@@ -642,9 +661,9 @@ fn read_templates(py: Python<'_>, db: &str, resolution: i32) -> PyResult<Py<PyLi
 ///     and `mods` (mod name -> {resolution -> template count}; resolutions
 ///     where the mod has no template are absent).
 #[pyfunction]
-fn database_statistics(py: Python<'_>, db: &str) -> PyResult<Py<PyAny>> {
+fn database_statistics(py: Python<'_>, db: PathBuf) -> PyResult<Py<PyAny>> {
     let stats = py
-        .detach(|| database::hdf5_writer::read_statistics(Path::new(db)))
+        .detach(|| database::hdf5_writer::read_statistics(&db))
         .map_err(to_py_err)?;
     let result = PyDict::new(py);
     result.set_item("resolutions", &stats.resolutions)?;
