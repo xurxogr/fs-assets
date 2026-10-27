@@ -137,6 +137,25 @@ impl<W: Write> Write for CappedWriter<W> {
     }
 }
 
+/// Whether `name` is usable as a file or directory name on Windows too: not
+/// a reserved device name (`CON`, `NUL`, `COM1`…, with any extension, which
+/// Windows opens as the device instead of a file) and not ending in `.` or a
+/// space (which Windows drops, so `a.uasset.` would overwrite `a.uasset`).
+pub(crate) fn is_portable_name(name: &str) -> bool {
+    const RESERVED: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
+    let stem = name.split('.').next().unwrap_or("");
+    let numbered_device = ["COM", "LPT"].iter().any(|prefix| {
+        stem.get(..3)
+            .is_some_and(|p| p.eq_ignore_ascii_case(prefix))
+            && matches!(
+                &stem[3..],
+                "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+    });
+    let reserved = numbered_device || RESERVED.iter().any(|r| stem.eq_ignore_ascii_case(r));
+    !reserved && !name.ends_with(['.', ' '])
+}
+
 /// `output_dir` joined with `entry`, an untrusted relative path such as a pak
 /// index entry or a catalog object path. Only plain name components are
 /// accepted, split on both `/` and `\\`, so an entry can't climb out with
@@ -151,7 +170,11 @@ pub(crate) fn contained_path(output_dir: &Path, entry: &str) -> anyhow::Result<P
     {
         let mut components = Path::new(part).components();
         match (components.next(), components.next()) {
-            (Some(Component::Normal(name)), None) if !part.contains(':') => dest.push(name),
+            (Some(Component::Normal(name)), None)
+                if !part.contains(':') && is_portable_name(part) =>
+            {
+                dest.push(name)
+            }
             _ => anyhow::bail!("path {entry:?} escapes {}", output_dir.display()),
         }
     }
@@ -357,6 +380,29 @@ mod tests {
         fs::write(&pak_path, pak).unwrap();
 
         assert!(list(&pak_path).is_err());
+    }
+
+    #[test]
+    fn contained_path_refuses_names_windows_would_not_keep() {
+        let out = Path::new("out");
+        for entry in [
+            "War/CON",
+            "War/nul.uasset",
+            "War/Com1/a.uasset",
+            "War/LPT9.txt",
+            "War/a.uasset.",
+            "War/dir /a.uasset",
+        ] {
+            assert!(contained_path(out, entry).is_err(), "{entry}");
+        }
+        for entry in [
+            "War/CONSOLE.uasset",
+            "War/COM10.uasset",
+            "War/Nullable",
+            "War/COM.uasset",
+        ] {
+            assert!(contained_path(out, entry).is_ok(), "{entry}");
+        }
     }
 
     #[test]

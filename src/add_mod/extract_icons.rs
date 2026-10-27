@@ -157,10 +157,13 @@ where
 }
 
 /// Whether `name` names a file directly inside a directory on every host:
-/// not empty, `.` or `..`, and free of path separators, drive or stream
-/// colons and NULs.
+/// not empty, `.` or `..`, free of path separators, drive or stream colons
+/// and NULs, and not a name Windows reserves or rewrites (see
+/// [`crate::pak::is_portable_name`]).
 fn is_plain_file_name(name: &str) -> bool {
-    !matches!(name, "" | "." | "..") && !name.contains(['/', '\\', ':', '\0'])
+    !matches!(name, "" | "." | "..")
+        && !name.contains(['/', '\\', ':', '\0'])
+        && crate::pak::is_portable_name(name)
 }
 
 /// Resolves and decodes a subtype icon, reporting (not failing on) a decode
@@ -248,7 +251,17 @@ mod tests {
 
     #[test]
     fn refuses_codes_that_are_not_plain_file_names() {
-        for code in ["../escape", "a/b", "a\\b", "C:escape", "..", ""] {
+        for code in [
+            "../escape",
+            "a/b",
+            "a\\b",
+            "C:escape",
+            "..",
+            "",
+            "NUL",
+            "com1",
+            "Rifle.",
+        ] {
             let tmp = tempfile::tempdir().unwrap();
             let (icon_path, file) = write_icon(tmp.path(), RIFLE, [0, 0, 0, 255]);
             let items = vec![CatalogIconItem {
