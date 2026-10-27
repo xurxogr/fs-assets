@@ -308,6 +308,61 @@ def test_path_arguments_accept_pathlib_paths(tmp_path):
     assert coverage["main_icons_found"] == 1
 
 
+def test_unpak_extracts_what_pack_wrote(tmp_path):
+    content = tmp_path / "content"
+    (content / "War" / "Content").mkdir(parents=True)
+    (content / "War" / "Content" / "a.uasset").write_bytes(b"first")
+    (content / "War" / "Content" / "b.uexp").write_bytes(b"second")
+    pak = tmp_path / "test.pak"
+    fs_assets.pack(content, pak)
+
+    out = tmp_path / "out"
+    extracted = fs_assets.unpak(pak, out, include=".uasset")
+
+    assert extracted == ["War/Content/a.uasset"]
+    assert (out / "War" / "Content" / "a.uasset").read_bytes() == b"first"
+    assert not (out / "War" / "Content" / "b.uexp").exists()
+
+
+def test_locres_pack_and_dump_round_trip(tmp_path):
+    document = {
+        "version": 2,
+        "namespaces": [
+            {
+                "namespace": "Items",
+                "namespace_hash": 7,
+                "entries": [
+                    {"key": "Rifle", "key_hash": 1, "source_hash": 2, "text": "Fusil"},
+                    {"key": "Mortar", "key_hash": 3, "source_hash": 4, "text": "Mortero ñ"},
+                ],
+            }
+        ],
+    }
+    dump = tmp_path / "dump.json"
+    dump.write_text(json.dumps(document), encoding="utf-8")
+    locres = tmp_path / "Game.locres"
+
+    fs_assets.locres_pack(dump, locres)
+    stats = fs_assets.locres_dump(locres, tmp_path / "redump.json")
+
+    assert stats["namespaces"] == 1
+    redump = json.loads((tmp_path / "redump.json").read_text(encoding="utf-8"))
+    for entry in document["namespaces"][0]["entries"]:
+        entry["input_text"] = entry["text"]
+    assert redump == document
+
+
+def test_grep_strings_finds_ascii_and_utf16_matches(tmp_path):
+    (tmp_path / "ascii.uasset").write_bytes(b"\x00\x01BP_Stockpile_C\x00")
+    (tmp_path / "wide.uasset").write_bytes(b"\x00" + "Stockpile".encode("utf-16-le"))
+    (tmp_path / "none.uasset").write_bytes(b"nothing here")
+
+    matches = fs_assets.grep_strings("Stockpile", tmp_path)
+
+    found = {(Path(m["path"]).name, m["encoding"]) for m in matches}
+    assert found == {("ascii.uasset", "ascii"), ("wide.uasset", "utf16le")}
+
+
 def test_pak_coverage_counts_catalog_icons(tmp_path):
     coverage = fs_assets.pak_coverage(
         catalog=str(_catalog(tmp_path)), pak=[str(_icon_mod_pak(tmp_path))]
