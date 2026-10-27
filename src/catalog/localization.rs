@@ -366,15 +366,6 @@ impl LocalizationLookup {
             None => false,
         }
     }
-
-    /// Get statistics about loaded localizations: counts per language.
-    pub fn get_stats(&self) -> HashMap<String, usize> {
-        self.cache
-            .borrow()
-            .iter()
-            .map(|(lang, strings)| (lang.clone(), strings.len()))
-            .collect()
-    }
 }
 
 #[cfg(test)]
@@ -618,34 +609,6 @@ mod tests {
             assert!(!lookup.is_guid(&json!("Hello World")));
             assert!(!lookup.is_guid(&json!(12345)));
             assert!(!lookup.is_guid(&Value::Null));
-        }
-    }
-
-    mod get_stats {
-        use super::*;
-
-        #[test]
-        fn returns_counts() {
-            let tmp = tempfile::tempdir().unwrap();
-            let en_path = tmp.path().join("Foxhole-Content/en/test.locres");
-            let de_path = tmp.path().join("Foxhole-Content/de/test.locres");
-            create_mock_locres(&en_path, &[("A", "Hello"), ("B", "World")]);
-            create_mock_locres(&de_path, &[("A", "Hallo")]);
-
-            let lookup = LocalizationLookup::new(tmp.path(), None);
-            lookup.get("A", Some("en"));
-            lookup.get("A", Some("de"));
-
-            let stats = lookup.get_stats();
-            assert_eq!(stats.get("en"), Some(&2));
-            assert_eq!(stats.get("de"), Some(&1));
-        }
-
-        #[test]
-        fn returns_empty_for_no_loaded() {
-            let tmp = tempfile::tempdir().unwrap();
-            let lookup = LocalizationLookup::new(tmp.path(), None);
-            assert!(lookup.get_stats().is_empty());
         }
     }
 
