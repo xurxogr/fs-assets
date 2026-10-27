@@ -41,14 +41,19 @@ def test_package_version_needs_no_installed_metadata(monkeypatch):
     assert reloaded.__version__ == reloaded.version()
 
 
-def test_unpak_nonexistent_pak_raises():
-    with pytest.raises(RuntimeError):
+def test_unpak_nonexistent_pak_raises_file_not_found():
+    with pytest.raises(FileNotFoundError, match="nonexistent.pak"):
         fs_assets.unpak("nonexistent.pak", "/tmp/fs-assets-test-out")
 
 
-def test_convert_to_json_nonexistent_raises():
-    with pytest.raises(RuntimeError):
+def test_convert_to_json_nonexistent_raises_file_not_found():
+    with pytest.raises(FileNotFoundError, match="nonexistent.uasset"):
         fs_assets.convert_to_json("nonexistent.uasset")
+
+
+def test_locres_pack_nonexistent_raises_file_not_found(tmp_path):
+    with pytest.raises(FileNotFoundError, match="missing.json"):
+        fs_assets.locres_pack(str(tmp_path / "missing.json"), str(tmp_path / "out.locres"))
 
 
 def test_modify_icon_invalid_faction_raises_value_error():
@@ -117,7 +122,7 @@ def test_add_mod_missing_catalog_raises(tmp_path):
 
 
 def test_add_mod_missing_pak_raises(tmp_path):
-    with pytest.raises(RuntimeError):
+    with pytest.raises(FileNotFoundError, match="missing.pak"):
         fs_assets.add_mod(
             pak=str(tmp_path / "missing.pak"),
             catalog=str(_catalog(tmp_path)),

@@ -14,12 +14,18 @@ use pyo3::types::{PyBytes, PyDict, PyList};
 use crate::add_mod::{AddModRequest, AssetSource, ExtractIconsRequest, Progress};
 use crate::{catalog, convert, database, grep, locres};
 
+/// Raises `e` as the `OSError` subclass matching the I/O error that caused it
+/// (`FileNotFoundError` for a missing path, `PermissionError`, ...), or as a
+/// `RuntimeError` when no I/O error did.
 fn to_py_err(e: anyhow::Error) -> PyErr {
-    PyErr::new::<PyRuntimeError, _>(crate::cli::error_message(&e))
-}
-
-fn io_err(e: std::io::Error) -> PyErr {
-    PyErr::new::<PyRuntimeError, _>(e.to_string())
+    let message = crate::cli::error_message(&e);
+    match e
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+    {
+        Some(io) => std::io::Error::new(io.kind(), message).into(),
+        None => PyErr::new::<PyRuntimeError, _>(message),
+    }
 }
 
 /// Converts a `serde_json::Value` into a native Python object (dict/list/
@@ -494,9 +500,7 @@ fn locres_dump(
 #[pyfunction]
 fn locres_pack(py: Python<'_>, input: PathBuf, output: PathBuf) -> PyResult<()> {
     py.detach(|| {
-        let bytes = std::fs::read(&input).map_err(io_err)?;
-        let dump_doc: locres::DumpDocument = serde_json::from_slice(&bytes)
-            .map_err(|e| PyErr::new::<PyRuntimeError, _>(e.to_string()))?;
+        let dump_doc = locres::read_dump(&input).map_err(to_py_err)?;
         let doc = locres::pack(&dump_doc).map_err(to_py_err)?;
         locres::write(&doc, &output).map_err(to_py_err)
     })

@@ -5,6 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use image::DynamicImage;
 
 use super::{load_catalog, AssetSource, Progress, Stage};
@@ -131,7 +132,7 @@ fn write_icons<F>(
 where
     F: Fn(&str) -> Option<PathBuf>,
 {
-    std::fs::create_dir_all(output)?;
+    std::fs::create_dir_all(output).with_context(|| format!("creating {}", output.display()))?;
     let mut stats = ExtractIconsStats::default();
     let mut subicon_cache: HashMap<String, Option<DynamicImage>> = HashMap::new();
     // Reported before each item rather than after, since a missing or

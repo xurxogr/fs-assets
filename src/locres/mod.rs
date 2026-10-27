@@ -185,6 +185,12 @@ impl TextBudget {
     }
 }
 
+/// Reads an edited JSON translation file written by [`dump`].
+pub fn read_dump(path: &Path) -> Result<DumpDocument> {
+    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
+}
+
 /// Parse a version-2 `.locres` file, preserving every namespace, key, hash,
 /// and string exactly.
 pub fn parse(path: &Path) -> Result<LocresDocument> {

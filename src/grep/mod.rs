@@ -10,6 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use memchr::memmem::Finder;
 
 /// Which on-disk `FString` encoding a match was found in.
@@ -78,7 +79,7 @@ pub fn search_content_dir_with_progress(
     let mut matches = Vec::new();
     for (done, path) in files.iter().enumerate() {
         let path = path.as_path();
-        let data = std::fs::read(path)?;
+        let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         if ascii
             .as_ref()
             .is_some_and(|ascii| contains_bytes(&data, ascii))

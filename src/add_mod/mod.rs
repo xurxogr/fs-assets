@@ -23,6 +23,7 @@ pub use progress::{Progress, Stage};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use serde_json::Value;
 
 use crate::database::pipeline::{overlay_icon_paths, DatabaseBuildStats};
@@ -208,7 +209,10 @@ fn load_catalog(path: &Path) -> anyhow::Result<Vec<Value>> {
             path.display()
         );
     }
-    let entries: Vec<Value> = serde_json::from_slice(&std::fs::read(path)?)?;
+    let entries: Vec<Value> = serde_json::from_slice(
+        &std::fs::read(path).with_context(|| format!("reading {}", path.display()))?,
+    )
+    .with_context(|| format!("parsing {}", path.display()))?;
     if entries.is_empty() {
         anyhow::bail!("catalog {} has no entries", path.display());
     }

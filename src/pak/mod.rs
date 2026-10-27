@@ -3,11 +3,13 @@ use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Write};
 use std::path::{Component, Path, PathBuf};
 
+use anyhow::Context;
 use repak::PakBuilder;
 
 /// Lists every file path recorded in `pak`'s index.
 pub fn list(pak: &Path) -> anyhow::Result<Vec<String>> {
-    let mut file = BufReader::new(File::open(pak)?);
+    let mut file =
+        BufReader::new(File::open(pak).with_context(|| format!("opening {}", pak.display()))?);
     let reader = PakBuilder::new().reader(&mut file)?;
     let mut files = reader.files();
     files.sort();
@@ -101,7 +103,8 @@ pub fn extract_matching_within<F>(
 where
     F: Fn(&str) -> bool,
 {
-    let mut file = BufReader::new(File::open(pak)?);
+    let mut file =
+        BufReader::new(File::open(pak).with_context(|| format!("opening {}", pak.display()))?);
     let reader = PakBuilder::new().reader(&mut file)?;
 
     // Every destination is checked before anything is written. On a
@@ -134,13 +137,15 @@ where
             );
         }
         if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
 
         // Streamed straight to disk rather than through `reader.get`, which
         // would hold the whole decompressed entry in memory.
         let mut out = CappedWriter {
-            inner: BufWriter::new(File::create(&dest)?),
+            inner: BufWriter::new(
+                File::create(&dest).with_context(|| format!("creating {}", dest.display()))?,
+            ),
             written: 0,
             budget: *budget,
         };
@@ -361,7 +366,7 @@ pub fn pack_with_progress(
     progress(0, total)?;
     let mut written = Vec::with_capacity(total);
     for (path, rel_str) in files {
-        let data = fs::read(&path)?;
+        let data = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
         writer
             .write_file(&rel_str, false, data)
             .map_err(|e| anyhow::anyhow!("failed to write {rel_str}: {e}"))?;

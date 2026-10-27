@@ -5,6 +5,7 @@ use std::panic::UnwindSafe;
 use std::path::Path;
 use std::sync::Once;
 
+use anyhow::Context;
 use serde_json::{json, Map, Value};
 use unreal_asset::engine_version::EngineVersion;
 use unreal_asset::exports::{Export, ExportBaseTrait, ExportNormalTrait};
@@ -195,7 +196,10 @@ fn parse_asset<C: Read + Seek + UnwindSafe>(reader: C, path: &Path) -> anyhow::R
 
 /// The flat property map of `path`'s `Default__` export.
 pub fn uasset_to_json(path: &Path) -> anyhow::Result<Value> {
-    let asset = parse_asset(BufReader::new(File::open(path)?), path)?;
+    let asset = parse_asset(
+        BufReader::new(File::open(path).with_context(|| format!("opening {}", path.display()))?),
+        path,
+    )?;
     for export in &asset.asset_data.exports {
         if let Some(normal) = export.get_normal_export() {
             let name = normal.base_export.object_name.get_content();
@@ -225,7 +229,10 @@ fn package_index_to_i32(index: PackageIndex) -> i32 {
 /// representation needed by `blueprint_parser`, `data_table_lookup`,
 /// `damage_type_resolver`, and `catalog_assembler`.
 pub fn uasset_to_full_json(path: &Path) -> anyhow::Result<Value> {
-    let asset = parse_asset(BufReader::new(File::open(path)?), path)?;
+    let asset = parse_asset(
+        BufReader::new(File::open(path).with_context(|| format!("opening {}", path.display()))?),
+        path,
+    )?;
     let imports: Vec<Value> = asset
         .imports
         .iter()
@@ -1078,7 +1085,7 @@ pub fn uasset_to_image(path: &Path) -> anyhow::Result<image::DynamicImage> {
     // `unreal_asset` at all (`Error: failed to fill whole buffer`) yet still
     // yields a perfectly good embedded PNG this way — worth knowing if this
     // function's error path ever needs a stricter validation step.
-    let file_bytes = std::fs::read(path)?;
+    let file_bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
 
     for sig_offset in find_png_magic_offsets(&file_bytes) {
         if sig_offset < 12 {

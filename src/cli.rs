@@ -3,6 +3,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::add_mod::{self, AssetSource};
@@ -370,11 +371,12 @@ fn run_command(command: Commands) -> anyhow::Result<()> {
         Commands::Convert { input, to, output } => match to {
             ConvertFormat::Json => {
                 let value = convert::uasset_to_json(&input)?;
-                std::fs::write(&output, serde_json::to_string_pretty(&value)?)?;
+                crate::atomic_write::write_json(&output, &value)?;
             }
             ConvertFormat::Png => {
                 let png = convert::uasset_to_png(&input)?;
-                std::fs::write(&output, png)?;
+                std::fs::write(&output, png)
+                    .with_context(|| format!("writing {}", output.display()))?;
             }
         },
         Commands::BuildCatalog {
@@ -556,7 +558,7 @@ fn run_command(command: Commands) -> anyhow::Result<()> {
             );
         }
         Commands::LocresPack { input, output } => {
-            let dump_doc: locres::DumpDocument = serde_json::from_slice(&std::fs::read(&input)?)?;
+            let dump_doc = locres::read_dump(&input)?;
             let doc = locres::pack(&dump_doc)?;
             locres::write(&doc, &output)?;
             println!("packed to {}", output.display());
