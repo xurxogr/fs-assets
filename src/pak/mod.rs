@@ -188,22 +188,24 @@ pub(crate) fn contained_path(output_dir: &Path, entry: &str) -> anyhow::Result<P
 /// this mod is meant to sit alongside — for Foxhole itself that's
 /// `"../../../"` and `Version::V8B`, the values of the game's own
 /// `War-WindowsNoEditor.pak`. Returns every packed file's path, relative to
-/// `input_dir` with `/` separators, sorted for stable output.
+/// `input_dir` with `/` separators, sorted for stable output. A directory
+/// that can't be read (or a missing `input_dir`) fails the whole pack, before
+/// `output` is created, rather than producing a pak missing its files.
 pub fn pack(
     input_dir: &Path,
     output: &Path,
     mount_point: &str,
     version: repak::Version,
 ) -> anyhow::Result<Vec<String>> {
+    let entries = walkdir::WalkDir::new(input_dir)
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
     let file = File::create(output)?;
     let mut writer =
         PakBuilder::new().writer(BufWriter::new(file), version, mount_point.to_string(), None);
 
     let mut written = Vec::new();
-    for entry in walkdir::WalkDir::new(input_dir)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
+    for entry in entries {
         if !entry.file_type().is_file() {
             continue;
         }
@@ -468,5 +470,19 @@ mod tests {
 
         let files = list(&pak_path).unwrap();
         assert_eq!(files, vec![locres_rel.to_string()]);
+    }
+
+    #[test]
+    fn packing_a_missing_directory_fails_without_writing_a_pak() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pak_path = tmp.path().join("out.pak");
+        assert!(pack(
+            &tmp.path().join("missing"),
+            &pak_path,
+            "../../../",
+            repak::Version::V8B
+        )
+        .is_err());
+        assert!(!pak_path.exists());
     }
 }

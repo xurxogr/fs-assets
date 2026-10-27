@@ -38,7 +38,8 @@ pub struct GrepMatch {
 /// Recursively search every `.uasset`/`.uexp` file under `content_dir` for
 /// `pattern`, checked as both raw ASCII/Latin-1 bytes and UTF-16LE bytes. A
 /// file that matches in both encodings is reported once per encoding, sorted
-/// by path then encoding.
+/// by path then encoding. A directory or file that can't be read (or a
+/// missing `content_dir`) fails the search rather than silently narrowing it.
 pub fn search_content_dir(content_dir: &Path, pattern: &str) -> anyhow::Result<Vec<GrepMatch>> {
     let utf16_needle: Vec<u8> = pattern
         .encode_utf16()
@@ -48,10 +49,8 @@ pub fn search_content_dir(content_dir: &Path, pattern: &str) -> anyhow::Result<V
     let utf16 = Finder::new(&utf16_needle);
 
     let mut matches = Vec::new();
-    for entry in walkdir::WalkDir::new(content_dir)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
+    for entry in walkdir::WalkDir::new(content_dir) {
+        let entry = entry?;
         if !entry.file_type().is_file() {
             continue;
         }
@@ -165,5 +164,11 @@ mod tests {
         let matches = search_content_dir(tmp.path(), "Export Empty Stockpile Entries").unwrap();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].path, path);
+    }
+
+    #[test]
+    fn searching_a_missing_directory_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(search_content_dir(&tmp.path().join("missing"), "anything").is_err());
     }
 }
