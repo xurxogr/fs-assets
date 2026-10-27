@@ -84,13 +84,13 @@ where
     Ok(extracted)
 }
 
-/// `output_dir` joined with `entry`, a path read from an untrusted pak index.
-/// Only plain name components are accepted, split on both `/` and `\\`, so an
-/// entry can't climb out with `..` or replace `output_dir` with an absolute or
-/// drive-prefixed path. A `:` is refused on every host, since on Windows it
+/// `output_dir` joined with `entry`, an untrusted relative path such as a pak
+/// index entry or a catalog object path. Only plain name components are
+/// accepted, split on both `/` and `\\`, so an entry can't climb out with
+/// `..` or replace `output_dir` with an absolute or drive-prefixed path. A `:` is refused on every host, since on Windows it
 /// starts a drive prefix (`C:`) or an alternate data stream. Empty and `.`
 /// components are skipped.
-fn contained_path(output_dir: &Path, entry: &str) -> anyhow::Result<PathBuf> {
+pub(crate) fn contained_path(output_dir: &Path, entry: &str) -> anyhow::Result<PathBuf> {
     let mut dest = output_dir.to_path_buf();
     for part in entry
         .split(['/', '\\'])
@@ -99,11 +99,11 @@ fn contained_path(output_dir: &Path, entry: &str) -> anyhow::Result<PathBuf> {
         let mut components = Path::new(part).components();
         match (components.next(), components.next()) {
             (Some(Component::Normal(name)), None) if !part.contains(':') => dest.push(name),
-            _ => anyhow::bail!("pak entry {entry:?} escapes the output directory"),
+            _ => anyhow::bail!("path {entry:?} escapes {}", output_dir.display()),
         }
     }
     if dest == output_dir {
-        anyhow::bail!("pak entry {entry:?} has no file name");
+        anyhow::bail!("path {entry:?} has no file name");
     }
     Ok(dest)
 }

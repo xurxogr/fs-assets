@@ -69,12 +69,14 @@ pub fn filesystem_icon_loader(extract_dir: &Path) -> impl Fn(&str) -> Option<Pat
     move |icon_path: &str| resolve_icon_file(extract_dir, icon_path)
 }
 
-/// The `.uasset` file backing `icon_path` under `dir`, if there is one.
+/// The `.uasset` file backing `icon_path` under `dir`, if there is one. An
+/// `icon_path` that would resolve outside `dir` (it comes from the catalog,
+/// which a mod controls) resolves to nothing.
 fn resolve_icon_file(dir: &Path, icon_path: &str) -> Option<PathBuf> {
     if icon_path.is_empty() {
         return None;
     }
-    let candidate = dir.join(format!("{icon_path}.uasset"));
+    let candidate = crate::pak::contained_path(dir, &format!("{icon_path}.uasset")).ok()?;
     candidate.exists().then_some(candidate)
 }
 
@@ -751,6 +753,18 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let loader = filesystem_icon_loader(tmp.path());
             assert_eq!(loader(""), None);
+        }
+
+        #[test]
+        fn returns_none_for_a_path_escaping_the_extract_dir() {
+            let tmp = tempfile::tempdir().unwrap();
+            let extract_dir = tmp.path().join("extract");
+            std::fs::create_dir_all(&extract_dir).unwrap();
+            std::fs::write(tmp.path().join("Outside.uasset"), b"").unwrap();
+
+            let loader = filesystem_icon_loader(&extract_dir);
+            assert_eq!(loader("../Outside"), None);
+            assert_eq!(loader("War/../../Outside"), None);
         }
 
         #[test]
