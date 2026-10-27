@@ -77,6 +77,29 @@ pub fn collect_blueprint_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     Ok(results)
 }
 
+/// `raw` with every result remembered by object path, failures included. A
+/// load that panics (a malformed asset the parser chokes on) is reported and
+/// remembered as missing, like one that fails to parse: otherwise the panic
+/// would skip the cache, and every blueprint with that ancestor would parse
+/// it, and panic, again.
+fn cached_loader(raw: impl Fn(&str) -> Option<Value>) -> impl Fn(&str) -> Option<Value> {
+    let cache: RefCell<HashMap<String, Option<Value>>> = RefCell::new(HashMap::new());
+    move |object_path: &str| {
+        if let Some(cached) = cache.borrow().get(object_path) {
+            return cached.clone();
+        }
+        let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| raw(object_path)))
+            .unwrap_or_else(|_| {
+                eprintln!("build-catalog: panicked while parsing {object_path}");
+                None
+            });
+        cache
+            .borrow_mut()
+            .insert(object_path.to_string(), loaded.clone());
+        loaded
+    }
+}
+
 /// Build the complete catalog from a real extraction directory (e.g. the
 /// output of `fs-assets unpak`).
 ///
@@ -264,18 +287,7 @@ pub fn build_catalog_from_extract_dir_with_progress(
     // item) from scratch via `uasset_to_full_json` once per descendant,
     // which is quadratic-ish in practice and was measured to turn a ~5
     // minute build into 56+ minutes over the real ~24k-file corpus.
-    let raw_loader = filesystem_loader(&blueprints_dir);
-    let blueprint_cache: RefCell<HashMap<String, Option<Value>>> = RefCell::new(HashMap::new());
-    let blueprint_loader = |object_path: &str| -> Option<Value> {
-        if let Some(cached) = blueprint_cache.borrow().get(object_path) {
-            return cached.clone();
-        }
-        let loaded = raw_loader(object_path);
-        blueprint_cache
-            .borrow_mut()
-            .insert(object_path.to_string(), loaded.clone());
-        loaded
-    };
+    let blueprint_loader = cached_loader(filesystem_loader(&blueprints_dir));
 
     let ctx = AssemblerContext {
         full_extraction: true,
@@ -365,6 +377,34 @@ pub fn build_catalog_from_extract_dir_with_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod cached_loader_tests {
+        use super::*;
+        use std::cell::Cell;
+
+        #[test]
+        fn loads_each_path_once_failures_and_panics_included() {
+            let calls = Cell::new(0);
+            let loader = cached_loader(|path: &str| {
+                calls.set(calls.get() + 1);
+                match path {
+                    "/Game/Blueprints/Ok" => Some(serde_json::json!({"ok": true})),
+                    "/Game/Blueprints/Panics" => panic!("malformed asset"),
+                    _ => None,
+                }
+            });
+
+            for _ in 0..3 {
+                assert_eq!(
+                    loader("/Game/Blueprints/Ok"),
+                    Some(serde_json::json!({"ok": true}))
+                );
+                assert_eq!(loader("/Game/Blueprints/Missing"), None);
+                assert_eq!(loader("/Game/Blueprints/Panics"), None);
+            }
+            assert_eq!(calls.get(), 3);
+        }
+    }
 
     mod collect_blueprint_files_tests {
         use super::*;
