@@ -24,7 +24,7 @@ use serde_json::{json, Map, Value};
 use crate::catalog::blueprint_parser::{self, AssetLoader};
 use crate::catalog::data_table_lookup;
 use crate::catalog::localization::LocalizationLookup;
-use crate::catalog::utils::{extract_localized_text, normalize_object_path};
+use crate::catalog::utils::{extract_localized_text, is_truthy, normalize_object_path};
 
 /// Determine the ammo code for resolving `DamageType`.
 ///
@@ -330,21 +330,6 @@ fn value_str(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
         other => py_str(other),
-    }
-}
-
-/// Truthiness check over a `serde_json::Value` (null, `false`, zero, and
-/// empty strings/arrays/objects are falsy), mirroring `catalog::utils`'s
-/// private `is_truthy` (kept local since that helper isn't exported from
-/// `utils.rs`).
-fn is_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(true),
-        Value::String(s) => !s.is_empty(),
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(m) => !m.is_empty(),
     }
 }
 

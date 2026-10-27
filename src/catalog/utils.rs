@@ -53,6 +53,19 @@ fn value_to_display_string(value: &Value) -> String {
     }
 }
 
+/// Truthiness check over a `serde_json::Value`: null, `false`, zero, and
+/// empty strings/arrays/objects are falsy.
+pub(crate) fn is_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(true),
+        Value::String(s) => !s.is_empty(),
+        Value::Array(a) => !a.is_empty(),
+        Value::Object(m) => !m.is_empty(),
+    }
+}
+
 /// Simplify extracted values.
 ///
 /// - Convert floats to ints if they're whole numbers

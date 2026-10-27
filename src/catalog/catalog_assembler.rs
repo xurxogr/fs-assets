@@ -29,7 +29,7 @@ use crate::catalog::damage_type_resolver;
 use crate::catalog::data_table_lookup;
 use crate::catalog::localization::LocalizationLookup;
 use crate::catalog::stockpile_classifier::{self, StockpileCategory};
-use crate::catalog::utils::{extract_localized_text, normalize_object_path};
+use crate::catalog::utils::{extract_localized_text, is_truthy, normalize_object_path};
 
 /// Base path for hardcoded subtype icons (see [`add_subtype_icon`]).
 const SUBTYPE_ICONS_BASE: &str = "War/Content/Textures/UI/ItemIcons/";
@@ -68,20 +68,6 @@ pub struct AssemblerContext<'a> {
     pub tables: DataTables<'a>,
     pub production_categories: &'a HashMap<String, HashMap<String, String>>,
     pub loc_service: &'a LocalizationLookup,
-}
-
-/// Truthiness check over a `serde_json::Value` (empty string/array/
-/// object, zero, null and `false` are all falsy) — mirrors the private
-/// `is_truthy` helper duplicated in `damage_type_resolver.rs`.
-fn is_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(true),
-        Value::String(s) => !s.is_empty(),
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(m) => !m.is_empty(),
-    }
 }
 
 // ---------------------------------------------------------------------

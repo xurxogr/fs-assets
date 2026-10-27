@@ -7,6 +7,8 @@
 
 use serde_json::{Map, Value};
 
+use crate::catalog::utils::is_truthy;
+
 /// Vehicles produced at these build sites can be packed into crates.
 const CRATABLE_VEHICLE_BUILD_TYPES: &[&str] = &["AircraftFactory", "VehicleFactory", "Shipyard"];
 
@@ -155,19 +157,6 @@ fn enum_member(value: Option<&Value>) -> &str {
 
 fn is_true(value: Option<&Value>) -> bool {
     value == Some(&Value::Bool(true))
-}
-
-/// Truthiness check over a `serde_json::Value` (empty string/array/object,
-/// zero, null and `false` are falsy).
-fn is_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(true),
-        Value::String(s) => !s.is_empty(),
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(m) => !m.is_empty(),
-    }
 }
 
 #[cfg(test)]
