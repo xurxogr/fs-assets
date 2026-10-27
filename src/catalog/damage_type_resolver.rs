@@ -281,8 +281,14 @@ pub fn resolve_damage_type(
     // Convert /Game/ path to relative path for the parser (kept ".json"-
     // suffixed, which is the `bp_path` form `build_damage_type_result`
     // expects).
-    let mut bp_path = damage_type_path.replace("/Game/Blueprints/", "");
-    bp_path = bp_path.replace("_C", "");
+    // Only a segment's trailing `_C` (the generated-class suffix) goes: a
+    // name that merely contains `_C`, like `_Cluster`, is kept whole.
+    let mut bp_path = damage_type_path
+        .replace("/Game/Blueprints/", "")
+        .split('/')
+        .map(|segment| segment.strip_suffix("_C").unwrap_or(segment))
+        .collect::<Vec<_>>()
+        .join("/");
     {
         let parts: Vec<&str> = bp_path.split('/').collect();
         if parts.len() >= 2 && parts[parts.len() - 1] == parts[parts.len() - 2] {
@@ -792,6 +798,46 @@ mod tests {
             let loc = loc_service();
             let result = resolve_damage_type("RifleAmmo", &ammo, false, &loader, &loc).unwrap();
             assert_eq!(result["Type"], json!("Kinetic"));
+        }
+
+        #[test]
+        fn keeps_c_inside_a_name_and_only_strips_the_class_suffix() {
+            let ammo = json!({
+                "imports": [
+                    {"object_name": "/Game/Blueprints/DamageTypes/BPShrapnel_Cluster", "class_name": "Package", "class_package": "/Script/CoreUObject", "outer_index": 0},
+                    {"object_name": "BPShrapnel_Cluster_C", "class_name": "BlueprintGeneratedClass", "class_package": "/Script/Engine", "outer_index": -1},
+                ],
+                "exports": [
+                    {
+                        "object_name": "BPAmmoDynamicData",
+                        "class_index": 0, "super_index": 0, "template_index": 0, "outer_index": 0,
+                        "kind": "data_table",
+                        "properties": {},
+                        "rows": {"ClusterAmmo": {"DamageType": "Reference: -2"}},
+                    }
+                ],
+            });
+
+            let dt_asset = json!({
+                "imports": [],
+                "exports": [
+                    {
+                        "object_name": "Default__BPShrapnel_Cluster_C", "class_index": 0, "super_index": 0, "template_index": 0, "outer_index": 0,
+                        "kind": "normal",
+                        "properties": {"Type": "Shrapnel"},
+                    },
+                ],
+            });
+            let mut assets = HashMap::new();
+            assets.insert(
+                "/Game/Blueprints/DamageTypes/BPShrapnel_Cluster".to_string(),
+                dt_asset,
+            );
+            let loader = map_loader(assets);
+
+            let loc = loc_service();
+            let result = resolve_damage_type("ClusterAmmo", &ammo, false, &loader, &loc).unwrap();
+            assert_eq!(result["Type"], json!("Shrapnel"));
         }
     }
 }
