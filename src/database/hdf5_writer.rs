@@ -274,27 +274,8 @@ fn write_group(
     let n = templates.len();
 
     if n == 0 {
-        group
-            .new_attr::<VarLenUnicode>()
-            .create("resolution")?
-            .write_scalar(&vlen(&resolution.to_string())?)?;
-        group
-            .new_attr::<i64>()
-            .create("template_count")?
-            .write_scalar(&0i64)?;
-        group
-            .new_attr::<i64>()
-            .create("icon_size")?
-            .write_scalar(&0i64)?;
-        group
-            .new_attr::<i64>()
-            .create("version")?
-            .write_scalar(&DATABASE_VERSION)?;
-        group
-            .new_attr::<VarLenUnicode>()
-            .create("format")?
-            .write_scalar(&vlen("hdf5")?)?;
-        return Ok(());
+        // An empty group has no datasets, so no icon size either.
+        return write_group_attrs(group, resolution, 0, 0);
     }
 
     let icon_size = crate::database::icon_size_for_resolution(resolution) as usize;
@@ -354,6 +335,17 @@ fn write_group(
         .create("phash")?
         .write_raw(phash.as_slice())?;
 
+    write_group_attrs(group, resolution, n, icon_size)
+}
+
+/// Writes a resolution group's attributes, describing its `template_count`
+/// templates of `icon_size` x `icon_size` pixels.
+fn write_group_attrs(
+    group: &hdf5::Group,
+    resolution: i32,
+    template_count: usize,
+    icon_size: usize,
+) -> anyhow::Result<()> {
     group
         .new_attr::<VarLenUnicode>()
         .create("resolution")?
@@ -361,7 +353,7 @@ fn write_group(
     group
         .new_attr::<i64>()
         .create("template_count")?
-        .write_scalar(&(n as i64))?;
+        .write_scalar(&(template_count as i64))?;
     group
         .new_attr::<i64>()
         .create("icon_size")?
@@ -374,7 +366,6 @@ fn write_group(
         .new_attr::<VarLenUnicode>()
         .create("format")?
         .write_scalar(&vlen("hdf5")?)?;
-
     Ok(())
 }
 
