@@ -18,7 +18,7 @@
 //! and cached by a long-lived service object; memoizing repeated loads across
 //! a whole catalog build is the caller's responsibility (e.g. by giving the
 //! `blueprint_loader` closure its own cache), exactly as documented on
-//! `blueprint_parser::AssetLoader` and `data_table_lookup::AssetLoader`.
+//! `blueprint_parser::AssetLoader` and in `data_table_lookup`'s module docs.
 
 use std::collections::HashMap;
 

@@ -26,6 +26,14 @@
 //! the curve assets in `BPVehicleMovementProfileList`) and drop null ones;
 //! [`get_ammo_dynamic_data`] keeps them raw because `DamageType` is resolved
 //! separately by [`resolve_damage_type_import`].
+//!
+//! Assets are loaded through a [`crate::catalog::blueprint_parser::AssetLoader`]
+//! closure keyed by whatever name identifies them to the caller (a data
+//! table's file stem, or a factory blueprint's path relative to the
+//! Blueprints dir), so tests can inject an in-memory lookup. No cross-call
+//! cache is kept by any function in this module; memoizing repeated loads
+//! across a whole catalog build is the caller's responsibility, e.g. by
+//! giving the loader closure its own cache.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -58,17 +66,6 @@ pub const SHIP_DYNAMIC_DATA: &str = "BPShipDynamicData";
 /// Factory blueprint paths, relative to the Blueprints folder (not Data).
 pub const FACTORY_BLUEPRINT: &str = "Structures/BPFactory";
 pub const MASS_PRODUCTION_BLUEPRINT: &str = "Structures/BPMassProduction";
-
-/// Loader for an already-parsed asset (in `uasset_to_full_json` shape),
-/// keyed by whatever name identifies it to the caller (a data table's file
-/// stem, or a factory blueprint's path relative to the Blueprints dir).
-///
-/// Mirrors `blueprint_parser::AssetLoader`'s design rationale: kept generic
-/// over a plain closure rather than a filesystem path so tests can inject an
-/// in-memory lookup. No cross-call cache is kept by any function in this
-/// module; memoizing repeated loads across a whole catalog build is the
-/// caller's responsibility, e.g. by giving the loader closure its own cache.
-pub type AssetLoader<'a> = dyn Fn(&str) -> Option<Value> + 'a;
 
 // ---------------------------------------------------------------------
 // Data table row lookup
@@ -308,7 +305,7 @@ pub fn parse_factory_production_categories(asset: &Value) -> HashMap<String, Str
 /// MassProductionFactory blueprints, keyed by lowercase `CodeName`, each
 /// mapping to `{"Factory": QueueType}` and/or `{"MassProductionFactory":
 /// QueueType}`. Takes already-loaded assets rather than owning a cache —
-/// see [`AssetLoader`]'s docs for why.
+/// see the module docs for why.
 pub fn load_production_categories(
     factory_asset: Option<&Value>,
     mass_production_asset: Option<&Value>,
@@ -352,10 +349,12 @@ pub fn get_production_categories<'a>(
 // Filesystem-backed loaders
 // ---------------------------------------------------------------------
 
-/// Builds a filesystem-backed [`AssetLoader`] for data tables: maps a table
-/// name (e.g. `"BPAmmoDynamicData"`, no extension) to `<data_dir>/<name>.uasset`,
-/// parsed via `crate::convert::uasset_to_full_json`. Returns `None` if the
-/// file doesn't exist or fails to parse.
+/// Builds a filesystem-backed
+/// [`AssetLoader`](crate::catalog::blueprint_parser::AssetLoader) for data
+/// tables: maps a table name (e.g. `"BPAmmoDynamicData"`, no extension) to
+/// `<data_dir>/<name>.uasset`, parsed via
+/// `crate::convert::uasset_to_full_json`. Returns `None` if the file doesn't
+/// exist or fails to parse.
 pub fn filesystem_data_loader(data_dir: &Path) -> impl Fn(&str) -> Option<Value> + '_ {
     move |table_name: &str| {
         let candidate = data_dir.join(format!("{table_name}.uasset"));
@@ -366,9 +365,11 @@ pub fn filesystem_data_loader(data_dir: &Path) -> impl Fn(&str) -> Option<Value>
     }
 }
 
-/// Builds a filesystem-backed [`AssetLoader`] for factory blueprints: maps a
-/// path relative to the Blueprints dir (e.g. `"Structures/BPFactory"`, no
-/// extension — see [`FACTORY_BLUEPRINT`]/[`MASS_PRODUCTION_BLUEPRINT`]) to
+/// Builds a filesystem-backed
+/// [`AssetLoader`](crate::catalog::blueprint_parser::AssetLoader) for factory
+/// blueprints: maps a path relative to the Blueprints dir (e.g.
+/// `"Structures/BPFactory"`, no extension — see
+/// [`FACTORY_BLUEPRINT`]/[`MASS_PRODUCTION_BLUEPRINT`]) to
 /// `<blueprints_dir>/<relative>.uasset`, parsed via
 /// `crate::convert::uasset_to_full_json`. Returns `None` if the file doesn't
 /// exist or fails to parse.
