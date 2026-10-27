@@ -93,7 +93,7 @@ impl PyProgress {
         if error.is_some() {
             return;
         }
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             if let Err(err) = callback.call1(py, (stage, done, total)) {
                 *error = Some(err);
             }
@@ -223,7 +223,7 @@ fn build_catalog(
         .ok_or_else(|| PyErr::new::<PyValueError, _>("one of extract_dir or pak is required"))?;
     let progress = PyProgress::new(progress);
     let building = |done: usize, total: usize| progress.report("building_catalog", done, total);
-    let result = py.allow_threads(|| match &source {
+    let result = py.detach(|| match &source {
         AssetSource::ExtractDir(dir) => {
             catalog::pipeline::build_catalog_from_extract_dir_with_progress(dir, &building)
         }
@@ -325,7 +325,7 @@ fn add_mod(
         resolutions: resolution.unwrap_or_default(),
     };
     let progress = PyProgress::new(progress);
-    let result = py.allow_threads(|| {
+    let result = py.detach(|| {
         crate::add_mod::add_mod(&request, &|update: Progress| {
             progress.report(update.stage.as_str(), update.done, update.total)
         })
@@ -538,7 +538,7 @@ fn extract_icons(
         subicons,
     };
     let stats = py
-        .allow_threads(|| crate::add_mod::extract_icons(&request))
+        .detach(|| crate::add_mod::extract_icons(&request))
         .map_err(to_py_err)?;
     let result = PyDict::new(py);
     result.set_item("written", stats.written)?;
@@ -567,7 +567,7 @@ fn extract_icons(
 fn pak_coverage(py: Python<'_>, catalog: &str, pak: PakPaths) -> PyResult<Py<PyAny>> {
     let paks = pak.into_paths();
     let coverage = py
-        .allow_threads(|| crate::add_mod::pak_coverage(Path::new(catalog), &paks))
+        .detach(|| crate::add_mod::pak_coverage(Path::new(catalog), &paks))
         .map_err(to_py_err)?;
     let result = PyDict::new(py);
     result.set_item("main_icons_found", coverage.main_icons_found)?;
@@ -592,7 +592,7 @@ fn pak_coverage(py: Python<'_>, catalog: &str, pak: PakPaths) -> PyResult<Py<PyA
 #[pyfunction]
 fn read_templates(py: Python<'_>, db: &str, resolution: i32) -> PyResult<Py<PyList>> {
     let templates = py
-        .allow_threads(|| database::hdf5_writer::read_resolution(Path::new(db), resolution))
+        .detach(|| database::hdf5_writer::read_resolution(Path::new(db), resolution))
         .map_err(to_py_err)?;
     let size = database::icon_size_for_resolution(resolution);
     let list = PyList::empty(py);
@@ -623,7 +623,7 @@ fn read_templates(py: Python<'_>, db: &str, resolution: i32) -> PyResult<Py<PyLi
 #[pyfunction]
 fn database_statistics(py: Python<'_>, db: &str) -> PyResult<Py<PyAny>> {
     let stats = py
-        .allow_threads(|| database::hdf5_writer::read_statistics(Path::new(db)))
+        .detach(|| database::hdf5_writer::read_statistics(Path::new(db)))
         .map_err(to_py_err)?;
     let result = PyDict::new(py);
     result.set_item("resolutions", &stats.resolutions)?;
@@ -655,7 +655,7 @@ fn version() -> &'static str {
 #[pyfunction]
 fn cli_main(py: Python<'_>, argv: Vec<String>) -> i32 {
     // Release the GIL: the CLI does blocking I/O for the whole call.
-    py.allow_threads(|| match crate::cli::run(argv) {
+    py.detach(|| match crate::cli::run(argv) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("Error: {}", e);
