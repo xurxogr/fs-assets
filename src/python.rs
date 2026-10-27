@@ -478,8 +478,8 @@ fn locres_pack(py: Python<'_>, input: &str, output: &str) -> PyResult<()> {
 }
 
 /// Search `.uasset`/`.uexp` files under a directory for a literal string,
-/// checking both ASCII/Latin-1 and UTF-16LE encodings — for finding UI text
-/// baked directly into a Blueprint/Widget asset instead of routed through a
+/// checking both ASCII and UTF-16LE encodings — for finding UI text baked
+/// directly into a Blueprint/Widget asset instead of routed through a
 /// `.locres` key.
 ///
 /// Args:

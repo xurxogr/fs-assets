@@ -212,9 +212,9 @@ enum Commands {
         version: PakVersionArg,
     },
     /// Search `.uasset`/`.uexp` files under a directory for a literal
-    /// string, checking both ASCII/Latin-1 and UTF-16LE encodings — for
-    /// finding UI text baked directly into a Blueprint/Widget asset instead
-    /// of routed through a `.locres` key.
+    /// string, checking both ASCII and UTF-16LE encodings — for finding UI
+    /// text baked directly into a Blueprint/Widget asset instead of routed
+    /// through a `.locres` key.
     GrepStrings {
         pattern: String,
         content_dir: PathBuf,

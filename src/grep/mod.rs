@@ -2,10 +2,11 @@
 //! finding strings baked directly into a Blueprint/Widget asset instead of
 //! routed through a `.locres` key.
 //!
-//! Every `FString` on disk is either single-byte (ASCII/Latin-1) or
-//! UTF-16LE, per the same two encodings `crate::locres`'s `read_fstring`/
-//! `write_fstring` already decode/encode — this searches for both byte
-//! representations of `pattern` since a given literal could use either.
+//! Every `FString` on disk is either single-byte or UTF-16LE, per the same
+//! two encodings `crate::locres`'s `read_fstring`/`write_fstring` already
+//! decode/encode. Unreal only stores a string single-byte when it is pure
+//! ASCII (anything else goes out as UTF-16), so an ASCII `pattern` is
+//! searched in both byte representations and any other only as UTF-16LE.
 
 use std::path::{Path, PathBuf};
 
@@ -14,7 +15,7 @@ use memchr::memmem::Finder;
 /// Which on-disk `FString` encoding a match was found in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Encoding {
-    /// Single-byte ASCII/Latin-1.
+    /// Single-byte ASCII.
     Ascii,
     /// UTF-16LE (2 bytes/char, matching how non-ASCII `FString`s are stored).
     Utf16Le,
@@ -36,7 +37,8 @@ pub struct GrepMatch {
 }
 
 /// Recursively search every `.uasset`/`.uexp` file under `content_dir` for
-/// `pattern`, checked as both raw ASCII/Latin-1 bytes and UTF-16LE bytes. A
+/// `pattern`, checked as UTF-16LE bytes and, when it is ASCII, as raw
+/// single-byte ASCII too (see the module docs). A
 /// file that matches in both encodings is reported once per encoding, sorted
 /// by path then encoding. A directory or file that can't be read (or a
 /// missing `content_dir`) fails the search rather than silently narrowing it.
@@ -45,7 +47,7 @@ pub fn search_content_dir(content_dir: &Path, pattern: &str) -> anyhow::Result<V
         .encode_utf16()
         .flat_map(|unit| unit.to_le_bytes())
         .collect();
-    let ascii = Finder::new(pattern.as_bytes());
+    let ascii = pattern.is_ascii().then(|| Finder::new(pattern.as_bytes()));
     let utf16 = Finder::new(&utf16_needle);
 
     let mut matches = Vec::new();
@@ -63,7 +65,10 @@ pub fn search_content_dir(content_dir: &Path, pattern: &str) -> anyhow::Result<V
         }
 
         let data = std::fs::read(path)?;
-        if contains_bytes(&data, &ascii) {
+        if ascii
+            .as_ref()
+            .is_some_and(|ascii| contains_bytes(&data, ascii))
+        {
             matches.push(GrepMatch {
                 path: path.to_path_buf(),
                 encoding: Encoding::Ascii,
@@ -164,6 +169,28 @@ mod tests {
         let matches = search_content_dir(tmp.path(), "Export Empty Stockpile Entries").unwrap();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].path, path);
+    }
+
+    #[test]
+    fn searches_a_non_ascii_pattern_only_as_utf16() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Its UTF-8 bytes can't be a single-byte `FString`, so they're no match.
+        fs::write(tmp.path().join("Utf8.uasset"), "Munición".as_bytes()).unwrap();
+        let utf16_path = tmp.path().join("Utf16.uasset");
+        let bytes: Vec<u8> = "Munición"
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        fs::write(&utf16_path, bytes).unwrap();
+
+        let matches = search_content_dir(tmp.path(), "Munición").unwrap();
+        assert_eq!(
+            matches,
+            vec![GrepMatch {
+                path: utf16_path,
+                encoding: Encoding::Utf16Le,
+            }]
+        );
     }
 
     #[test]
