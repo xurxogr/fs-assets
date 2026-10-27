@@ -17,6 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - name: Install Rust (version pinned in rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
@@ -40,6 +42,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
@@ -65,3 +69,19 @@ jobs:
           python -m mypy.stubtest fs_assets._fs_assets
       - name: Tests
         run: pytest tests/python
+
+  audit:
+    name: audit · RustSec advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Install Rust (version pinned in rust-toolchain.toml)
+        run: rustup toolchain install
+      # Built from crates.io rather than through a third-party action, so the
+      # only extra code trusted is cargo-audit itself.
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit --version 0.22.1
+      - name: Audit Cargo.lock
+        run: cargo audit

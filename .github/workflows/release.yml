@@ -37,6 +37,8 @@ jobs:
           - { runner: macos-14,       target: aarch64, os: macos }
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
@@ -46,8 +48,9 @@ jobs:
           target: ${{ matrix.platform.target }}
           # Passing --features replaces pyproject's [tool.maturin] features, so
           # `python` must be repeated here.
-          args: --release --out dist --features python,static-hdf5
-          sccache: "true"
+          # --locked: build exactly the reviewed Cargo.lock. No sccache: a
+          # release build must not restore a cache other runs could write.
+          args: --release --locked --out dist --features python,static-hdf5
           # manylinux_2_28 has a toolchain able to build HDF5 from source;
           # before-script-linux runs inside that container.
           manylinux: "2_28"
@@ -69,6 +72,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - name: Build sdist
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
@@ -92,13 +97,14 @@ jobs:
           - { runner: macos-14,       arch: aarch64, os: macos,   target: aarch64-apple-darwin }
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       # Every target is the runner's native one; the version is pinned in
       # rust-toolchain.toml.
       - name: Install Rust
         run: rustup toolchain install
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          key: cli-${{ matrix.platform.target }}
+      # No rust-cache: a release build must not restore a cache other runs
+      # (including pull requests) could write.
       - name: Build CLI (static HDF5)
         shell: bash
         run: |
@@ -130,6 +136,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - name: Compare tag to Cargo.toml version
         shell: bash
         run: |

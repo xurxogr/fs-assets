@@ -9,3 +9,13 @@ updates:
     groups:
       github-actions:
         patterns: ["*"]
+  # Cargo.lock: security updates as they are published, plus a weekly grouped
+  # PR for the rest. The git dependencies (the repak and unreal_asset forks)
+  # are pinned to a rev and are not updated by Dependabot.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ["*"]
