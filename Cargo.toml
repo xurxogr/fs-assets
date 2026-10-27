@@ -85,9 +85,11 @@ static-hdf5 = ["hdf5-sys/static", "hdf5-sys/zlib", "dep:libz-sys"]
 # `Vec::with_capacity`/`IndexedMap::with_capacity` counts instead of
 # surfacing a recoverable `Error`, plus one map-value struct-type ambiguity
 # affecting large-ship blueprints (see the fork's commit f6872e7 for the
-# fix), which together make several large-ship blueprints unreadable.
+# fix), which together make several large-ship blueprints unreadable. The
+# fork also caps property/Kismet nesting at 32 levels (commit e7829e4), so a
+# crafted asset fails to parse instead of overflowing the stack.
 [patch.crates-io]
-unreal_asset = { git = "https://github.com/xurxogr/unrealmodding", rev = "439971cd6a87b9d0b0c58f7f88f96ebf2dec5189" }
+unreal_asset = { git = "https://github.com/xurxogr/unrealmodding", rev = "e7829e48e25c1ad0e117f86bc8f096a27e351eb7" }
 
 
 [profile.release]
