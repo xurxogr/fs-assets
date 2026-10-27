@@ -36,12 +36,12 @@ jobs:
           # which can't execute x86_64 binaries when cross-building on arm64.
           - { runner: macos-14,       target: aarch64, os: macos }
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           target: ${{ matrix.platform.target }}
           # Passing --features replaces pyproject's [tool.maturin] features, so
@@ -59,7 +59,7 @@ jobs:
           python -m pip install --find-links dist --no-index fs-assets
           python -c "import fs_assets; print('fs_assets', fs_assets.__version__)"
           fs-assets --version
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}
           path: dist/*.whl
@@ -68,13 +68,13 @@ jobs:
     name: sdist
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Build sdist
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           command: sdist
           args: --out dist
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: sdist
           path: dist/*.tar.gz
@@ -91,12 +91,12 @@ jobs:
           - { runner: windows-latest, arch: x86_64,  os: windows, target: x86_64-pc-windows-msvc }
           - { runner: macos-14,       arch: aarch64, os: macos,   target: aarch64-apple-darwin }
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       # Every target is the runner's native one; the version is pinned in
       # rust-toolchain.toml.
       - name: Install Rust
         run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: cli-${{ matrix.platform.target }}
       - name: Build CLI (static HDF5)
@@ -117,7 +117,7 @@ jobs:
             tar -C "target/${{ matrix.platform.target }}/release" -czf "$name.tar.gz" "$CLI_BIN"
             echo "asset=$name.tar.gz" >> "$GITHUB_OUTPUT"
           fi
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: cli-${{ matrix.platform.os }}-${{ matrix.platform.arch }}
           path: ${{ steps.pkg.outputs.asset }}
@@ -129,7 +129,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Compare tag to Cargo.toml version
         shell: bash
         run: |
@@ -154,12 +154,12 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           pattern: "{wheels-*,sdist}"
           path: dist
           merge-multiple: true
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
 
   github-release:
     name: release · GitHub
@@ -169,12 +169,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           pattern: "cli-*"
           path: cli
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           generate_release_notes: true
           files: cli/*
