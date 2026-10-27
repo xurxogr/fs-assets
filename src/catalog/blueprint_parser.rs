@@ -26,7 +26,9 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Map, Value};
 
 use crate::catalog::import_resolution;
-use crate::catalog::utils::{load_full_json, parse_reference, simplify_value};
+use crate::catalog::utils::{
+    import_at, import_slot, load_full_json, parse_reference, simplify_value,
+};
 
 /// Callback used to load a parent blueprint's asset JSON (in
 /// `uasset_to_full_json` shape) given its `/Game/...` object path.
@@ -214,11 +216,7 @@ fn resolve_parent_blueprint(
         .get("super_index")
         .and_then(Value::as_i64)
         .unwrap_or(0);
-    if super_index >= 0 {
-        return None;
-    }
-
-    let import_obj = imports.get(usize::try_from(super_index.unsigned_abs() - 1).ok()?)?;
+    let import_obj = import_at(super_index, imports)?;
     import_resolution::resolve_import_full_path(import_obj, imports)
 }
 
@@ -340,8 +338,7 @@ fn resolve_reference_into(
     if ref_idx == 0 {
         return;
     }
-    if ref_idx < 0 {
-        let idx = (-ref_idx - 1) as usize;
+    if let Some(idx) = import_slot(ref_idx) {
         if let Some(Some(path)) = processed_imports.get(idx) {
             emit(json!(path));
         } else if full_extraction {
@@ -353,9 +350,14 @@ fn resolve_reference_into(
                 }
             }
         }
-    } else if full_extraction && (ref_idx as usize) <= exports.len() {
-        let export_obj = &exports[(ref_idx - 1) as usize];
-        if let Some(name) = export_obj.get("object_name").and_then(Value::as_str) {
+    } else if full_extraction {
+        let export_obj = usize::try_from(ref_idx - 1)
+            .ok()
+            .and_then(|idx| exports.get(idx));
+        if let Some(name) = export_obj
+            .and_then(|e| e.get("object_name"))
+            .and_then(Value::as_str)
+        {
             emit(json!(name));
         }
     }
@@ -451,6 +453,15 @@ fn blueprint_candidate(blueprints_dir: &Path, object_path: &str) -> Option<PathB
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extreme_reference_indices_resolve_to_nothing() {
+        for ref_idx in [i64::MIN, i64::MAX] {
+            let mut emitted = Vec::new();
+            resolve_reference_into(ref_idx, &[], &[], &[], true, |v| emitted.push(v));
+            assert!(emitted.is_empty(), "{ref_idx}: {emitted:?}");
+        }
+    }
     use serde_json::json;
     use std::collections::HashMap;
 

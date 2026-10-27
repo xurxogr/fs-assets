@@ -5,7 +5,7 @@
 
 use serde_json::{json, Value};
 
-use crate::catalog::utils::normalize_object_path;
+use crate::catalog::utils::{import_at, normalize_object_path};
 
 /// Resolve an import's full path by following the `OuterIndex` chain.
 ///
@@ -21,7 +21,7 @@ pub fn resolve_import_full_path(import_obj: &Value, all_imports: &[Value]) -> Op
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
     if outer_index < 0 {
-        let package_import = all_imports.get((-outer_index) as usize - 1)?;
+        let package_import = import_at(outer_index, all_imports)?;
         let package_path = package_import
             .get("ObjectName")
             .and_then(|v| v.as_str())
@@ -57,7 +57,7 @@ pub fn resolve_import_asset_path(import_obj: &Value, all_imports: &[Value]) -> O
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
     if outer_index < 0 {
-        let package_import = all_imports.get((-outer_index) as usize - 1)?;
+        let package_import = import_at(outer_index, all_imports)?;
         let package_path = package_import
             .get("ObjectName")
             .and_then(|v| v.as_str())

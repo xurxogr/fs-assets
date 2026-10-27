@@ -41,7 +41,7 @@ use std::path::Path;
 use serde_json::{json, Map, Value};
 
 use crate::catalog::import_resolution::{resolve_import_asset_path, to_pascalcase_import};
-use crate::catalog::utils::{load_full_json, parse_reference, resolve_import_path};
+use crate::catalog::utils::{import_at, load_full_json, parse_reference, resolve_import_path};
 
 // -- Data table file names (relative to the Data directory, no extension:
 // these are the `.uasset` file stems parsed via
@@ -154,10 +154,8 @@ fn resolve_reference_value(value: &Value, imports: &[Value]) -> Option<Value> {
     if index == 0 {
         return None;
     }
-    let path = usize::try_from(-index - 1)
-        .ok()
-        .and_then(|i| imports.get(i))
-        .and_then(|import| resolve_import_asset_path(import, imports));
+    let path =
+        import_at(index, imports).and_then(|import| resolve_import_asset_path(import, imports));
     Some(path.map(Value::String).unwrap_or_else(|| value.clone()))
 }
 
@@ -375,6 +373,12 @@ pub fn filesystem_blueprint_loader(blueprints_dir: &Path) -> impl Fn(&str) -> Op
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn an_out_of_range_reference_is_kept_as_is() {
+        let value = json!(format!("Reference: {}", i64::MIN));
+        assert_eq!(resolve_reference_value(&value, &[]), Some(value.clone()));
+    }
 
     fn data_table_asset(rows: Value) -> Value {
         json!({

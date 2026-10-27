@@ -170,19 +170,38 @@ pub fn resolve_import_path(import_index: i64, imports: &[Value]) -> Option<Strin
     Some(names.join("/"))
 }
 
-/// The import a negative `import_index` points at, or `None` for a
-/// non-negative or out-of-range index.
-fn import_at(import_index: i64, imports: &[Value]) -> Option<&Value> {
+/// The position in the imports table a negative `import_index` (UE's
+/// `-(slot + 1)` encoding) points at, or `None` for a non-negative index.
+/// Never overflows, whatever value a crafted asset holds.
+pub fn import_slot(import_index: i64) -> Option<usize> {
     if import_index >= 0 {
         return None;
     }
-    let index = usize::try_from(import_index.unsigned_abs() - 1).ok()?;
-    imports.get(index)
+    usize::try_from(import_index.unsigned_abs() - 1).ok()
+}
+
+/// The import a negative `import_index` points at, or `None` for a
+/// non-negative or out-of-range index.
+pub fn import_at(import_index: i64, imports: &[Value]) -> Option<&Value> {
+    imports.get(import_slot(import_index)?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn import_slot_decodes_negative_indices_without_overflowing() {
+        assert_eq!(import_slot(-1), Some(0));
+        assert_eq!(import_slot(-3), Some(2));
+        assert_eq!(import_slot(0), None);
+        assert_eq!(import_slot(5), None);
+        assert_eq!(
+            import_slot(i64::MIN),
+            usize::try_from((1u64 << 63) - 1).ok()
+        );
+        assert!(import_at(i64::MIN, &[json!({})]).is_none());
+    }
     use serde_json::json;
 
     mod load_full_json_tests {
