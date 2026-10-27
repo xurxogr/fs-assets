@@ -88,9 +88,10 @@ static-hdf5 = ["hdf5-sys/static", "hdf5-sys/zlib", "dep:libz-sys"]
 # affecting large-ship blueprints (see the fork's commit f6872e7 for the
 # fix), which together make several large-ship blueprints unreadable. The
 # fork also caps property/Kismet nesting at 32 levels (commit e7829e4), so a
-# crafted asset fails to parse instead of overflowing the stack.
+# crafted asset fails to parse instead of overflowing the stack, and moves to
+# zstd 0.14.3 for the RustSec decompression advisories (commit 0300a3d).
 [patch.crates-io]
-unreal_asset = { git = "https://github.com/xurxogr/unrealmodding", rev = "e7829e48e25c1ad0e117f86bc8f096a27e351eb7" }
+unreal_asset = { git = "https://github.com/xurxogr/unrealmodding", rev = "0300a3d2f1e527ee52255e764121c8278290785a" }
 
 
 [profile.release]
