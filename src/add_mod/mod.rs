@@ -50,7 +50,7 @@ impl AssetSource {
         icons: &HashSet<String>,
         dir: PathBuf,
         required: bool,
-        progress: &dyn Fn(usize, usize),
+        progress: &dyn Fn(usize, usize) -> anyhow::Result<()>,
     ) -> anyhow::Result<PathBuf> {
         match self {
             AssetSource::ExtractDir(source_dir) => Ok(source_dir.clone()),
@@ -126,7 +126,7 @@ pub fn extract_paks<F>(
     paks: &[PathBuf],
     keep: F,
     output_dir: &Path,
-    progress: &dyn Fn(usize, usize),
+    progress: &dyn Fn(usize, usize) -> anyhow::Result<()>,
 ) -> anyhow::Result<usize>
 where
     F: Fn(&str) -> bool,
@@ -179,10 +179,11 @@ fn load_catalog(path: &Path) -> anyhow::Result<Vec<Value>> {
 /// Runs one full `add-mod`: builds the templates of every item in
 /// `request.catalog` from the mod's icons and merges them into
 /// `request.db`, reporting each stage's progress to `progress` along the
-/// way. `request.catalog` is never written.
+/// way; an error `progress` returns stops the run and is returned.
+/// `request.catalog` is never written.
 pub fn add_mod(
     request: &AddModRequest,
-    progress: &dyn Fn(Progress),
+    progress: &dyn Fn(Progress) -> anyhow::Result<()>,
 ) -> anyhow::Result<DatabaseBuildStats> {
     let resolutions = database::resolve_resolutions(&request.resolutions)?;
     let catalog = load_catalog(&request.catalog)?;
@@ -259,7 +260,8 @@ mod tests {
 
         let reports = std::cell::RefCell::new(Vec::new());
         let extracted = extract_paks(&[first, second], |_| true, &out, &|done, total| {
-            reports.borrow_mut().push((done, total))
+            reports.borrow_mut().push((done, total));
+            Ok(())
         })
         .unwrap();
 
@@ -294,7 +296,7 @@ mod tests {
             tmp.path().join("database.h5"),
         );
 
-        let stats = add_mod(&request, &|_| {}).unwrap();
+        let stats = add_mod(&request, &|_| Ok(())).unwrap();
 
         // Both (placeholder) icons are found, one from each pak.
         assert_eq!(stats.icons_missing, 0);
@@ -360,7 +362,7 @@ mod tests {
             tmp.path().join("database.h5"),
         );
 
-        let err = add_mod(&request, &|_| {}).unwrap_err();
+        let err = add_mod(&request, &|_| Ok(())).unwrap_err();
 
         assert!(err.to_string().contains("build-catalog"));
         assert!(!request.db.exists());
@@ -377,7 +379,7 @@ mod tests {
             tmp.path().join("database.h5"),
         );
 
-        let err = add_mod(&request, &|_| {}).unwrap_err();
+        let err = add_mod(&request, &|_| Ok(())).unwrap_err();
 
         assert!(err.to_string().contains("no entries"));
         assert!(!request.db.exists());
@@ -392,7 +394,7 @@ mod tests {
             tmp.path().join("database.h5"),
         );
 
-        assert!(add_mod(&request, &|_| {}).is_err());
+        assert!(add_mod(&request, &|_| Ok(())).is_err());
         assert!(!request.db.exists());
     }
 
@@ -410,7 +412,7 @@ mod tests {
             tmp.path().join("database.h5"),
         );
 
-        let err = add_mod(&request, &|_| {}).unwrap_err();
+        let err = add_mod(&request, &|_| Ok(())).unwrap_err();
 
         assert!(err.to_string().contains("none of the catalog's icons"));
         assert!(!request.db.exists());
@@ -439,7 +441,7 @@ mod tests {
             )
         };
 
-        let stats = add_mod(&request, &|_| {}).unwrap();
+        let stats = add_mod(&request, &|_| Ok(())).unwrap();
 
         // The mod's own (placeholder) rifle icon is tried; the pistol icon
         // only vanilla has is not borrowed.
@@ -465,7 +467,11 @@ mod tests {
         };
 
         let reports = std::cell::RefCell::new(Vec::new());
-        let stats = add_mod(&request, &|report| reports.borrow_mut().push(report)).unwrap();
+        let stats = add_mod(&request, &|report| {
+            reports.borrow_mut().push(report);
+            Ok(())
+        })
+        .unwrap();
         let reports = reports.into_inner();
 
         let mut stages: Vec<Stage> = reports.iter().map(|r| r.stage).collect();

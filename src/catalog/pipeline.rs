@@ -92,7 +92,7 @@ pub fn collect_blueprint_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
 pub fn build_catalog_from_extract_dir(
     extract_dir: &Path,
 ) -> anyhow::Result<(Vec<Value>, CatalogStats)> {
-    build_catalog_from_extract_dir_with_progress(extract_dir, &|_, _| {})
+    build_catalog_from_extract_dir_with_progress(extract_dir, &|_, _| Ok(()))
 }
 
 /// Pak path prefixes [`build_catalog_from_extract_dir`] reads from.
@@ -111,7 +111,7 @@ pub fn is_catalog_input(pak_path: &str) -> bool {
 /// ([`CATALOG_INPUT_PREFIXES`]) are extracted, into a temporary directory
 /// removed afterwards, then built as [`build_catalog_from_extract_dir`] does.
 pub fn build_catalog_from_pak(pak: &Path) -> anyhow::Result<(Vec<Value>, CatalogStats)> {
-    build_catalog_from_pak_with_progress(pak, &|_, _| {}, &|_, _| {})
+    build_catalog_from_pak_with_progress(pak, &|_, _| Ok(()), &|_, _| Ok(()))
 }
 
 /// Same as [`build_catalog_from_pak`], reporting `(done, total)` over the
@@ -119,8 +119,8 @@ pub fn build_catalog_from_pak(pak: &Path) -> anyhow::Result<(Vec<Value>, Catalog
 /// `building` (see [`build_catalog_from_extract_dir_with_progress`]).
 pub fn build_catalog_from_pak_with_progress(
     pak: &Path,
-    extracting: &dyn Fn(usize, usize),
-    building: &dyn Fn(usize, usize),
+    extracting: &dyn Fn(usize, usize) -> anyhow::Result<()>,
+    building: &dyn Fn(usize, usize) -> anyhow::Result<()>,
 ) -> anyhow::Result<(Vec<Value>, CatalogStats)> {
     let workspace = tempfile::tempdir()?;
     let extracted = crate::pak::extract_matching_with_progress(
@@ -141,10 +141,11 @@ pub fn build_catalog_from_pak_with_progress(
 
 /// Same as [`build_catalog_from_extract_dir`], reporting `(done, total)`
 /// over the blueprint files to `progress`: once before the first file and
-/// once after the last.
+/// once after the last. An error `progress` returns stops the build and is
+/// returned.
 pub fn build_catalog_from_extract_dir_with_progress(
     extract_dir: &Path,
-    progress: &dyn Fn(usize, usize),
+    progress: &dyn Fn(usize, usize) -> anyhow::Result<()>,
 ) -> anyhow::Result<(Vec<Value>, CatalogStats)> {
     if !extract_dir.exists() {
         anyhow::bail!("extraction directory not found: {}", extract_dir.display());
@@ -289,12 +290,12 @@ pub fn build_catalog_from_extract_dir_with_progress(
     };
     let mut catalog: Vec<Value> = Vec::new();
 
-    progress(0, files.len());
+    progress(0, files.len())?;
     for (index, file) in files.iter().enumerate() {
         // Reported up front for the previous file, so every `continue`
         // below still counts as a finished step.
         if index > 0 {
-            progress(index, files.len());
+            progress(index, files.len())?;
         }
         stats.parsed += 1;
 
@@ -336,7 +337,7 @@ pub fn build_catalog_from_extract_dir_with_progress(
         catalog.push(catalog_assembler::clean_entry(&entry));
         stats.stockpilable += 1;
     }
-    progress(files.len(), files.len());
+    progress(files.len(), files.len())?;
 
     catalog.sort_by(|a, b| {
         let key_a = a
@@ -470,7 +471,8 @@ mod tests {
 
             let reports = std::cell::RefCell::new(Vec::new());
             build_catalog_from_extract_dir_with_progress(tmp.path(), &|done, total| {
-                reports.borrow_mut().push((done, total))
+                reports.borrow_mut().push((done, total));
+                Ok(())
             })
             .unwrap();
 
@@ -604,8 +606,14 @@ mod tests {
             let building = RefCell::new(Vec::new());
             let (catalog, stats) = build_catalog_from_pak_with_progress(
                 &pak_path,
-                &|done, total| extracting.borrow_mut().push((done, total)),
-                &|done, total| building.borrow_mut().push((done, total)),
+                &|done, total| {
+                    extracting.borrow_mut().push((done, total));
+                    Ok(())
+                },
+                &|done, total| {
+                    building.borrow_mut().push((done, total));
+                    Ok(())
+                },
             )
             .unwrap();
 

@@ -146,8 +146,11 @@ def test_add_mod_imports_an_icon_only_pak_without_touching_the_catalog(tmp_path)
     assert db.exists()
 
 
-def test_add_mod_reraises_progress_callback_errors(tmp_path):
+def test_add_mod_stops_at_the_first_progress_callback_error(tmp_path):
+    calls = []
+
     def fail(stage, done, total):
+        calls.append(stage)
         raise KeyError(stage)
 
     with pytest.raises(KeyError):
@@ -157,6 +160,9 @@ def test_add_mod_reraises_progress_callback_errors(tmp_path):
             db=str(tmp_path / "database.h5"),
             progress=fail,
         )
+
+    assert calls == ["extracting_icons"]
+    assert not (tmp_path / "database.h5").exists()
 
 
 def _catalog_inputs_pak(tmp_path):

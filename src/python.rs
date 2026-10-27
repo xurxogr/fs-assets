@@ -68,9 +68,11 @@ fn parse_pak_version(value: &str) -> PyResult<repak::Version> {
     }
 }
 
-/// A Python `(stage, done, total)` progress callable, called from Rust code
-/// that runs with the GIL released. The first exception it raises is kept,
-/// later reports are skipped, and [`PyProgress::finish`] re-raises it.
+/// An optional Python `(stage, done, total)` progress callable, called from
+/// Rust code that runs with the GIL released. Each report also runs pending
+/// signal handlers, so Ctrl-C raises `KeyboardInterrupt` even without a
+/// callable. The first exception the callable or a handler raises is kept and
+/// fails that report, which stops the work; [`PyProgress::finish`] re-raises it.
 struct PyProgress {
     callback: Option<Py<PyAny>>,
     error: Mutex<Option<PyErr>>,
@@ -84,21 +86,23 @@ impl PyProgress {
         }
     }
 
-    /// Calls the callable (re-acquiring the GIL) unless there is none or it
-    /// already raised.
-    fn report(&self, stage: &str, done: usize, total: usize) {
-        let Some(callback) = &self.callback else {
-            return;
-        };
+    /// Calls the callable, if any, and the pending signal handlers
+    /// (re-acquiring the GIL), failing once either has raised.
+    fn report(&self, stage: &str, done: usize, total: usize) -> anyhow::Result<()> {
         let mut error = self.error.lock().unwrap_or_else(|e| e.into_inner());
-        if error.is_some() {
-            return;
+        if error.is_none() {
+            *error = Python::attach(|py| {
+                if let Some(callback) = &self.callback {
+                    callback.call1(py, (stage, done, total))?;
+                }
+                py.check_signals()
+            })
+            .err();
         }
-        Python::attach(|py| {
-            if let Err(err) = callback.call1(py, (stage, done, total)) {
-                *error = Some(err);
-            }
-        });
+        match *error {
+            Some(_) => Err(anyhow::anyhow!("stopped by a Python exception")),
+            None => Ok(()),
+        }
     }
 
     /// Re-raises the exception the callable raised, if any.

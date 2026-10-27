@@ -63,7 +63,9 @@ pub fn extract_icons(request: &ExtractIconsRequest) -> anyhow::Result<ExtractIco
     let source_dir =
         request
             .source
-            .icons_dir(&wanted, workspace.path().join("source"), true, &|_, _| {})?;
+            .icons_dir(&wanted, workspace.path().join("source"), true, &|_, _| {
+                Ok(())
+            })?;
     let vanilla_dir = request
         .vanilla
         .as_ref()
@@ -73,7 +75,7 @@ pub fn extract_icons(request: &ExtractIconsRequest) -> anyhow::Result<ExtractIco
                 &subicon_paths,
                 workspace.path().join("vanilla"),
                 false,
-                &|_, _| {},
+                &|_, _| Ok(()),
             )
         })
         .transpose()?;

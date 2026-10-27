@@ -35,16 +35,17 @@ pub fn extract_matching<F>(pak: &Path, keep: F, output_dir: &Path) -> anyhow::Re
 where
     F: Fn(&str) -> bool,
 {
-    extract_matching_with_progress(pak, keep, output_dir, &|_, _| {})
+    extract_matching_with_progress(pak, keep, output_dir, &|_, _| Ok(()))
 }
 
 /// Same as [`extract_matching`], reporting `(done, total)` over the kept
-/// files to `progress`: once before the first file and once after each.
+/// files to `progress`: once before the first file and once after each. An
+/// error `progress` returns stops the extraction and is returned.
 pub fn extract_matching_with_progress<F>(
     pak: &Path,
     keep: F,
     output_dir: &Path,
-    progress: &dyn Fn(usize, usize),
+    progress: &dyn Fn(usize, usize) -> anyhow::Result<()>,
 ) -> anyhow::Result<Vec<String>>
 where
     F: Fn(&str) -> bool,
@@ -61,7 +62,7 @@ fn extract_capped<F>(
     pak: &Path,
     keep: F,
     output_dir: &Path,
-    progress: &dyn Fn(usize, usize),
+    progress: &dyn Fn(usize, usize) -> anyhow::Result<()>,
     max_entry_bytes: u64,
 ) -> anyhow::Result<Vec<String>>
 where
@@ -76,7 +77,7 @@ where
         .filter(|path| keep(path))
         .collect();
     let total = wanted.len();
-    progress(0, total);
+    progress(0, total)?;
 
     let mut extracted = Vec::with_capacity(total);
     for path in wanted {
@@ -102,7 +103,7 @@ where
             return Err(e.context(format!("failed to read {path}")));
         }
         extracted.push(path);
-        progress(extracted.len(), total);
+        progress(extracted.len(), total)?;
     }
 
     extracted.sort();
@@ -293,11 +294,30 @@ mod tests {
             &pak_path,
             |path| path.starts_with("dir/"),
             &tmp.path().join("out"),
-            &|done, total| reports.borrow_mut().push((done, total)),
+            &|done, total| {
+                reports.borrow_mut().push((done, total));
+                Ok(())
+            },
         )
         .unwrap();
 
         assert_eq!(reports.into_inner(), vec![(0, 1), (1, 1)]);
+    }
+
+    #[test]
+    fn a_failing_progress_report_stops_the_extraction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pak_path = tmp.path().join("test.pak");
+        fs::write(&pak_path, build_test_pak()).unwrap();
+        let out = tmp.path().join("out");
+
+        let err = extract_matching_with_progress(&pak_path, |_| true, &out, &|_, _| {
+            anyhow::bail!("stop")
+        })
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "stop");
+        assert!(!out.exists());
     }
 
     fn build_pak_with(entries: &[&str]) -> Vec<u8> {
@@ -350,15 +370,27 @@ mod tests {
         fs::write(&pak_path, buf.into_inner()).unwrap();
         let out_dir = tmp.path().join("out");
 
-        let err =
-            extract_capped(&pak_path, |p| p == "bomb.bin", &out_dir, &|_, _| {}, 1024).unwrap_err();
+        let err = extract_capped(
+            &pak_path,
+            |p| p == "bomb.bin",
+            &out_dir,
+            &|_, _| Ok(()),
+            1024,
+        )
+        .unwrap_err();
         assert!(
             format!("{err:#}").contains("larger than 1024 bytes"),
             "{err:#}"
         );
         assert!(!out_dir.join("bomb.bin").exists());
 
-        let ok = extract_capped(&pak_path, |p| p == "small.txt", &out_dir, &|_, _| {}, 1024);
+        let ok = extract_capped(
+            &pak_path,
+            |p| p == "small.txt",
+            &out_dir,
+            &|_, _| Ok(()),
+            1024,
+        );
         assert_eq!(ok.unwrap(), vec!["small.txt".to_string()]);
     }
 

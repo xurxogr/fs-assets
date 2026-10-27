@@ -400,7 +400,10 @@ where
                 mod_name,
                 resolutions: resolution,
             };
-            let stats = add_mod::add_mod(&request, &print_progress)?;
+            let stats = add_mod::add_mod(&request, &|update| {
+                print_progress(update);
+                Ok(())
+            })?;
 
             println!(
                 "db: total_items {} items_embedded {} missing_code {} icons_missing {} decode_errors {}",

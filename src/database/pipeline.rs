@@ -187,14 +187,14 @@ where
 ///
 /// Only `target_resolutions` are built, and `(done, total)` over the catalog
 /// entries is reported to `progress`: once before the first entry and once
-/// after each.
+/// after each. An error `progress` returns stops the build and is returned.
 pub fn build_database_from_catalog_with_progress<F>(
     catalog: &[Value],
     resolve_icon: F,
     mod_name: &str,
     target_resolutions: &[i32],
-    progress: &dyn Fn(usize, usize),
-) -> (BTreeMap<i32, Vec<IconTemplate>>, DatabaseBuildStats)
+    progress: &dyn Fn(usize, usize) -> anyhow::Result<()>,
+) -> anyhow::Result<(BTreeMap<i32, Vec<IconTemplate>>, DatabaseBuildStats)>
 where
     F: Fn(&str) -> Option<PathBuf>,
 {
@@ -205,12 +205,12 @@ where
     let mut stats = DatabaseBuildStats::default();
     let mut overlay_cache: HashMap<String, Option<Rc<image::DynamicImage>>> = HashMap::new();
 
-    progress(0, catalog.len());
+    progress(0, catalog.len())?;
     for (index, entry) in catalog.iter().enumerate() {
         // Reported up front for the previous entry, so every `continue`
         // below still counts as a finished step.
         if index > 0 {
-            progress(index, catalog.len());
+            progress(index, catalog.len())?;
         }
         stats.total_items += 1;
 
@@ -281,9 +281,9 @@ where
         }
         stats.items_embedded += 1;
     }
-    progress(catalog.len(), catalog.len());
+    progress(catalog.len(), catalog.len())?;
 
-    (resolutions, stats)
+    Ok((resolutions, stats))
 }
 
 /// Merges `new` templates into `existing`, per resolution, upserting by
@@ -359,7 +359,7 @@ pub fn add_mod_to_database_with_progress(
     output_path: &Path,
     vanilla_extract_dir: Option<&Path>,
     target_resolutions: &[i32],
-    progress: &dyn Fn(usize, usize),
+    progress: &dyn Fn(usize, usize) -> anyhow::Result<()>,
 ) -> anyhow::Result<DatabaseBuildStats> {
     if !extract_dir.exists() {
         anyhow::bail!("extraction directory not found: {}", extract_dir.display());
@@ -382,7 +382,7 @@ pub fn add_mod_to_database_with_progress(
         mod_name,
         target_resolutions,
         progress,
-    );
+    )?;
     let merged = replace_mod_templates(existing, new_templates, mod_name);
     hdf5_writer::write_database(&merged, output_path)?;
     Ok(stats)
@@ -548,8 +548,9 @@ mod tests {
             resolve_icon,
             mod_name,
             &database::SUPPORTED_RESOLUTIONS,
-            &|_, _| {},
+            &|_, _| Ok(()),
         )
+        .unwrap()
     }
 
     /// [`add_mod_to_database_with_progress`] at every supported resolution,
@@ -568,7 +569,7 @@ mod tests {
             output_path,
             vanilla_extract_dir,
             &database::SUPPORTED_RESOLUTIONS,
-            &|_, _| {},
+            &|_, _| Ok(()),
         )
     }
 
@@ -607,8 +608,9 @@ mod tests {
                 map_loader(StdHashMap::new()),
                 "vanilla",
                 &[1080, 1440],
-                &|_, _| {},
-            );
+                &|_, _| Ok(()),
+            )
+            .unwrap();
             assert_eq!(
                 resolutions.keys().copied().collect::<Vec<_>>(),
                 vec![1080, 1440]
@@ -625,8 +627,12 @@ mod tests {
                 map_loader(StdHashMap::new()),
                 "vanilla",
                 &database::SUPPORTED_RESOLUTIONS,
-                &|done, total| reports.borrow_mut().push((done, total)),
-            );
+                &|done, total| {
+                    reports.borrow_mut().push((done, total));
+                    Ok(())
+                },
+            )
+            .unwrap();
 
             assert_eq!(reports.into_inner(), vec![(0, 2), (1, 2), (2, 2)]);
         }
@@ -1012,7 +1018,7 @@ mod tests {
                 &output,
                 None,
                 &[1080],
-                &|_, _| {},
+                &|_, _| Ok(()),
             )
             .unwrap();
 
