@@ -325,14 +325,34 @@ pub fn error_message(error: &anyhow::Error) -> String {
     message
 }
 
-pub fn run<I, T>(args: I) -> anyhow::Result<()>
+/// Runs the command line `args` (program name first) and returns the process
+/// exit code: 0 on success, 1 when the command fails, and clap's own code
+/// for `--help`, `--version` and bad arguments. Never exits the process
+/// itself, so the Python bindings can call it inside the interpreter.
+pub fn run<I, T>(args: I) -> i32
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let cli = Cli::parse_from(args);
+    let cli = match Cli::try_parse_from(args) {
+        Ok(cli) => cli,
+        Err(e) => {
+            // Help and version go to stdout, usage errors to stderr.
+            let _ = e.print();
+            return e.exit_code();
+        }
+    };
+    match run_command(cli.command) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("Error: {}", error_message(&e));
+            1
+        }
+    }
+}
 
-    match cli.command {
+fn run_command(command: Commands) -> anyhow::Result<()> {
+    match command {
         Commands::Unpak {
             pak,
             include,
@@ -567,6 +587,27 @@ mod tests {
             "{message}"
         );
         assert_eq!(message.matches("os error 2").count(), 1, "{message}");
+    }
+
+    #[test]
+    fn run_returns_clap_exit_codes_instead_of_exiting() {
+        assert_eq!(run(["fs-assets", "--help"]), 0);
+        assert_eq!(run(["fs-assets", "no-such-command"]), 2);
+    }
+
+    #[test]
+    fn run_returns_1_when_the_command_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("missing");
+        assert_eq!(
+            run([
+                OsString::from("fs-assets"),
+                "grep-strings".into(),
+                "x".into(),
+                missing.into(),
+            ]),
+            1
+        );
     }
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {

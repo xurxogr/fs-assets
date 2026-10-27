@@ -300,6 +300,12 @@ def test_cli_main_restores_the_sigint_handler(tmp_path):
     assert signal.getsignal(signal.SIGINT) is before
 
 
+def test_cli_main_returns_instead_of_exiting_on_help_and_bad_arguments(capsys):
+    assert fs_assets.cli_main(["fs-assets", "--help"]) == 0
+    assert fs_assets.cli_main(["fs-assets", "no-such-command"]) == 2
+    assert fs_assets.cli_main(["fs-assets", "version"]) == 0
+
+
 def test_path_arguments_accept_pathlib_paths(tmp_path):
     db = tmp_path / "database.h5"
     icon = _png(tmp_path / "rifle.png", 64, 64, (200, 100, 50, 255))

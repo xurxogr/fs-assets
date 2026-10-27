@@ -695,7 +695,8 @@ fn version() -> &'static str {
 ///     argv: Argument vector, typically `sys.argv`.
 ///
 /// Returns:
-///     Process exit code (0 on success, 1 on error).
+///     Process exit code: 0 on success, 1 on error, and clap's code for
+///     `--help`, `--version` (0) and bad arguments (2).
 #[pyfunction]
 fn cli_main(py: Python<'_>, argv: Vec<String>) -> i32 {
     // Python's own SIGINT handler only raises once Python code runs again,
@@ -707,13 +708,7 @@ fn cli_main(py: Python<'_>, argv: Vec<String>) -> i32 {
         .as_ref()
         .and_then(|signal| swap_sigint_handler(signal, signal.getattr("SIG_DFL").ok()?));
     // Release the GIL: the CLI does blocking I/O for the whole call.
-    let code = py.detach(|| match crate::cli::run(argv) {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("Error: {}", crate::cli::error_message(&e));
-            1
-        }
-    });
+    let code = py.detach(|| crate::cli::run(argv));
     if let (Some(signal), Some(previous)) = (&signal, previous_sigint) {
         swap_sigint_handler(signal, previous);
     }
