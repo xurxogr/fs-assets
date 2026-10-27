@@ -414,6 +414,12 @@ struct TextureHeader {
     mip0_header_offset: usize,
 }
 
+/// Largest texture side `find_texture_header` accepts: UE4's default maximum
+/// texture size. The decode buffers grow with `width * height`, so this caps
+/// what one hostile header can make a decode allocate (about 512 MiB at
+/// 8192x8192, instead of 1.25 GiB at the engine's absolute 16384 limit).
+const MAX_TEXTURE_DIMENSION: i32 = 8192;
+
 /// Byte-scans `bytes[range_start..range_end]` -- the specific `Texture2D`
 /// export's own serialized byte range, per `unreal_asset`'s export table
 /// (`BaseExport::serial_offset`/`serial_size`), NOT the whole file -- for a
@@ -478,8 +484,8 @@ fn find_texture_header(
                 i32::from_le_bytes(bytes[sizex_off + 4..sizex_off + 8].try_into().unwrap());
             let num_slices =
                 i32::from_le_bytes(bytes[sizex_off + 8..sizex_off + 12].try_into().unwrap());
-            if !(1..=16384).contains(&size_x)
-                || !(1..=16384).contains(&size_y)
+            if !(1..=MAX_TEXTURE_DIMENSION).contains(&size_x)
+                || !(1..=MAX_TEXTURE_DIMENSION).contains(&size_y)
                 || !(1..=8).contains(&num_slices)
             {
                 continue;
@@ -772,7 +778,7 @@ fn locate_mip0_payload(
         let start = usize::try_from(abs_offset).ok()?;
         Some((start, len))
     } else {
-        Some((mip0_header_offset + 20, len))
+        Some((mip0_header_offset.checked_add(20)?, len))
     }
 }
 
@@ -1143,6 +1149,28 @@ mod tests {
             !QUIET_PANICS.with(Cell::get),
             "flag left set after unwinding"
         );
+    }
+
+    /// A minimal `PF_DXT1` texture header of `size` x `size` at offset 0.
+    fn texture_header_bytes(size: i32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for value in [size, size, 1, 8] {
+            bytes.extend_from_slice(&value.to_le_bytes()); // SizeX, SizeY, slices, FString len
+        }
+        bytes.extend_from_slice(b"PF_DXT1\0");
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // FirstMipToSerialize
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // Mips.Num()
+        bytes.resize(bytes.len() + 36, 0);
+        bytes
+    }
+
+    #[test]
+    fn find_texture_header_caps_the_texture_size() {
+        let at_cap = texture_header_bytes(MAX_TEXTURE_DIMENSION);
+        assert!(find_texture_header(&at_cap, 0, at_cap.len()).is_some());
+
+        let over_cap = texture_header_bytes(MAX_TEXTURE_DIMENSION * 2);
+        assert!(find_texture_header(&over_cap, 0, over_cap.len()).is_none());
     }
 
     #[test]
