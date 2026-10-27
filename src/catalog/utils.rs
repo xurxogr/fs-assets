@@ -1,6 +1,21 @@
 //! Shared utilities for catalog builder services.
 
+use std::path::Path;
+
 use serde_json::{json, Map, Value};
+
+/// `path` parsed via `crate::convert::uasset_to_full_json`, for the
+/// catalog's filesystem loaders: `None` if it doesn't exist, and also `None`
+/// (reported as a warning, since the catalog then comes out without that
+/// asset's data) if it exists but fails to parse.
+pub(crate) fn load_full_json(path: &Path) -> Option<Value> {
+    if !path.exists() {
+        return None;
+    }
+    crate::convert::uasset_to_full_json(path)
+        .map_err(|e| eprintln!("build-catalog: failed to parse {}: {e}", path.display()))
+        .ok()
+}
 
 /// Normalize an object path to War/Content format.
 ///
@@ -169,6 +184,24 @@ fn import_at(import_index: i64, imports: &[Value]) -> Option<&Value> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    mod load_full_json_tests {
+        use super::*;
+
+        #[test]
+        fn missing_file_is_none() {
+            let tmp = tempfile::tempdir().unwrap();
+            assert_eq!(load_full_json(&tmp.path().join("Missing.uasset")), None);
+        }
+
+        #[test]
+        fn unparseable_file_is_none() {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("Broken.uasset");
+            std::fs::write(&path, b"not an asset").unwrap();
+            assert_eq!(load_full_json(&path), None);
+        }
+    }
 
     mod normalize_object_path_tests {
         use super::*;

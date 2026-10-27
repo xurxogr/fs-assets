@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Map, Value};
 
 use crate::catalog::import_resolution;
-use crate::catalog::utils::{parse_reference, simplify_value};
+use crate::catalog::utils::{load_full_json, parse_reference, simplify_value};
 
 /// Callback used to load a parent blueprint's asset JSON (in
 /// `uasset_to_full_json` shape) given its `/Game/...` object path.
@@ -429,12 +429,13 @@ fn find_file_recursive(dir: &Path, filename: &OsStr) -> Option<PathBuf> {
 /// subdirectory search as [`find_blueprint_path`], then parses it via
 /// `crate::convert::uasset_to_full_json`. Returns `None` (a cache-miss, in
 /// `AssetLoader` terms) for paths outside `/Game/Blueprints/`, for files that
-/// don't exist, or for files that fail to parse.
+/// don't exist, or for files that fail to parse (with a warning; see
+/// `catalog::utils::load_full_json`).
 pub fn filesystem_loader(blueprints_dir: &Path) -> impl Fn(&str) -> Option<Value> + '_ {
     move |object_path: &str| {
         let candidate = blueprint_candidate(blueprints_dir, object_path)?;
         let resolved = find_blueprint_path(blueprints_dir, &candidate)?;
-        crate::convert::uasset_to_full_json(&resolved).ok()
+        load_full_json(&resolved)
     }
 }
 

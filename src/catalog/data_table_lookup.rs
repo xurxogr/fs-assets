@@ -41,7 +41,7 @@ use std::path::Path;
 use serde_json::{json, Map, Value};
 
 use crate::catalog::import_resolution::{resolve_import_asset_path, to_pascalcase_import};
-use crate::catalog::utils::{parse_reference, resolve_import_path};
+use crate::catalog::utils::{load_full_json, parse_reference, resolve_import_path};
 
 // -- Data table file names (relative to the Data directory, no extension:
 // these are the `.uasset` file stems parsed via
@@ -354,15 +354,9 @@ pub fn get_production_categories<'a>(
 /// tables: maps a table name (e.g. `"BPAmmoDynamicData"`, no extension) to
 /// `<data_dir>/<name>.uasset`, parsed via
 /// `crate::convert::uasset_to_full_json`. Returns `None` if the file doesn't
-/// exist or fails to parse.
+/// exist or fails to parse (the latter with a warning).
 pub fn filesystem_data_loader(data_dir: &Path) -> impl Fn(&str) -> Option<Value> + '_ {
-    move |table_name: &str| {
-        let candidate = data_dir.join(format!("{table_name}.uasset"));
-        if !candidate.exists() {
-            return None;
-        }
-        crate::convert::uasset_to_full_json(&candidate).ok()
-    }
+    move |table_name: &str| load_full_json(&data_dir.join(format!("{table_name}.uasset")))
 }
 
 /// Builds a filesystem-backed
@@ -372,15 +366,9 @@ pub fn filesystem_data_loader(data_dir: &Path) -> impl Fn(&str) -> Option<Value>
 /// [`FACTORY_BLUEPRINT`]/[`MASS_PRODUCTION_BLUEPRINT`]) to
 /// `<blueprints_dir>/<relative>.uasset`, parsed via
 /// `crate::convert::uasset_to_full_json`. Returns `None` if the file doesn't
-/// exist or fails to parse.
+/// exist or fails to parse (the latter with a warning).
 pub fn filesystem_blueprint_loader(blueprints_dir: &Path) -> impl Fn(&str) -> Option<Value> + '_ {
-    move |relative: &str| {
-        let candidate = blueprints_dir.join(format!("{relative}.uasset"));
-        if !candidate.exists() {
-            return None;
-        }
-        crate::convert::uasset_to_full_json(&candidate).ok()
-    }
+    move |relative: &str| load_full_json(&blueprints_dir.join(format!("{relative}.uasset")))
 }
 
 #[cfg(test)]
