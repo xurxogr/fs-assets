@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Seek};
+use std::io::{self, BufReader, BufWriter, Write};
 use std::path::{Component, Path, PathBuf};
 
 use repak::PakBuilder;
@@ -51,6 +51,24 @@ pub fn extract_matching_with_progress<F>(
 where
     F: Fn(&str) -> bool,
 {
+    extract_capped(pak, keep, output_dir, progress, MAX_ENTRY_BYTES)
+}
+
+/// Largest decompressed size accepted for one pak entry. The compression
+/// headers come from the pak itself, so a small entry from an untrusted mod
+/// could otherwise inflate without bound; real game entries are far smaller.
+const MAX_ENTRY_BYTES: u64 = 4 << 30;
+
+fn extract_capped<F>(
+    pak: &Path,
+    keep: F,
+    output_dir: &Path,
+    progress: &dyn Fn(usize, usize),
+    max_entry_bytes: u64,
+) -> anyhow::Result<Vec<String>>
+where
+    F: Fn(&str) -> bool,
+{
     let mut file = BufReader::new(File::open(pak)?);
     let reader = PakBuilder::new()
         .reader(&mut file)
@@ -66,22 +84,57 @@ where
 
     let mut extracted = Vec::with_capacity(total);
     for path in wanted {
-        file.rewind()?;
-        let data = reader
-            .get(&path, &mut file)
-            .map_err(|e| anyhow::anyhow!("failed to read {path}: {e}"))?;
-
         let dest = contained_path(output_dir, &path)?;
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&dest, data)?;
+
+        // Streamed straight to disk rather than through `reader.get`, which
+        // would hold the whole decompressed entry in memory.
+        let mut out = CappedWriter {
+            inner: BufWriter::new(File::create(&dest)?),
+            written: 0,
+            limit: max_entry_bytes,
+        };
+        let written = reader
+            .read_file(&path, &mut file, &mut out)
+            .map_err(anyhow::Error::from)
+            .and_then(|()| Ok(out.flush()?));
+        if let Err(e) = written {
+            drop(out);
+            let _ = fs::remove_file(&dest);
+            return Err(e.context(format!("failed to read {path}")));
+        }
         extracted.push(path);
         progress(extracted.len(), total);
     }
 
     extracted.sort();
     Ok(extracted)
+}
+
+/// A writer that fails once more than `limit` bytes have gone through it.
+struct CappedWriter<W> {
+    inner: W,
+    written: u64,
+    limit: u64,
+}
+
+impl<W: Write> Write for CappedWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.written += buf.len() as u64;
+        if self.written > self.limit {
+            return Err(io::Error::other(format!(
+                "entry is larger than {} bytes",
+                self.limit
+            )));
+        }
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 /// `output_dir` joined with `entry`, an untrusted relative path such as a pak
@@ -255,6 +308,37 @@ mod tests {
             assert!(!tmp.path().join("nested/escape.txt").exists(), "{entry}");
             assert!(!tmp.path().join("escape.txt").exists(), "{entry}");
         }
+    }
+
+    #[test]
+    fn refuses_entries_that_decompress_past_the_cap() {
+        let mut buf = Cursor::new(Vec::new());
+        let mut writer = Builder::new()
+            .compression([repak::Compression::Zlib])
+            .writer(&mut buf, repak::Version::V11, "../../../".to_string(), None);
+        writer
+            .write_file("bomb.bin", true, vec![0u8; 1 << 20].as_slice())
+            .unwrap();
+        writer
+            .write_file("small.txt", false, b"hi".as_slice())
+            .unwrap();
+        writer.write_index().unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let pak_path = tmp.path().join("bomb.pak");
+        fs::write(&pak_path, buf.into_inner()).unwrap();
+        let out_dir = tmp.path().join("out");
+
+        let err =
+            extract_capped(&pak_path, |p| p == "bomb.bin", &out_dir, &|_, _| {}, 1024).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("larger than 1024 bytes"),
+            "{err:#}"
+        );
+        assert!(!out_dir.join("bomb.bin").exists());
+
+        let ok = extract_capped(&pak_path, |p| p == "small.txt", &out_dir, &|_, _| {}, 1024);
+        assert_eq!(ok.unwrap(), vec!["small.txt".to_string()]);
     }
 
     #[test]

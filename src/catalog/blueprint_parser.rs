@@ -966,7 +966,10 @@ mod tests {
                 blueprint_candidate(blueprints_dir, "/Game/Blueprints/Items/BPFoo"),
                 Some(blueprints_dir.join("Items/BPFoo.uasset"))
             );
-            assert_eq!(blueprint_candidate(blueprints_dir, "/Game/Other/BPFoo"), None);
+            assert_eq!(
+                blueprint_candidate(blueprints_dir, "/Game/Other/BPFoo"),
+                None
+            );
         }
 
         #[test]
