@@ -50,20 +50,40 @@ pub fn extract_matching_with_progress<F>(
 where
     F: Fn(&str) -> bool,
 {
-    extract_capped(pak, keep, output_dir, progress, MAX_ENTRY_BYTES)
+    extract_matching_within(pak, keep, output_dir, progress, &mut ExtractBudget::unpak())
 }
 
-/// Largest decompressed size accepted for one pak entry. The compression
-/// headers come from the pak itself, so a small entry from an untrusted mod
-/// could otherwise inflate without bound; real game entries are far smaller.
-const MAX_ENTRY_BYTES: u64 = 4 << 30;
+/// How much a pak extraction may write. The compression headers come from
+/// the pak itself, so a small entry from an untrusted mod could otherwise
+/// inflate without bound, and many such entries could fill the disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtractBudget {
+    /// Largest decompressed size accepted for one entry.
+    pub max_entry_bytes: u64,
+    /// Bytes still allowed in total, shrinking as entries are written; one
+    /// budget can be shared by the extractions of several paks.
+    pub remaining_bytes: u64,
+}
 
-fn extract_capped<F>(
+impl ExtractBudget {
+    /// For a plain `unpak`, where the user picks what to extract: entries of
+    /// up to 4 GiB (real game entries are far smaller) and no total limit.
+    pub fn unpak() -> Self {
+        Self {
+            max_entry_bytes: 4 << 30,
+            remaining_bytes: u64::MAX,
+        }
+    }
+}
+
+/// Same as [`extract_matching_with_progress`], writing no more than
+/// `budget` allows and charging what it writes to it.
+pub fn extract_matching_within<F>(
     pak: &Path,
     keep: F,
     output_dir: &Path,
     progress: &dyn Fn(usize, usize) -> anyhow::Result<()>,
-    max_entry_bytes: u64,
+    budget: &mut ExtractBudget,
 ) -> anyhow::Result<Vec<String>>
 where
     F: Fn(&str) -> bool,
@@ -91,7 +111,7 @@ where
         let mut out = CappedWriter {
             inner: BufWriter::new(File::create(&dest)?),
             written: 0,
-            limit: max_entry_bytes,
+            budget: *budget,
         };
         let written = reader
             .read_file(&path, &mut file, &mut out)
@@ -102,6 +122,7 @@ where
             let _ = fs::remove_file(&dest);
             return Err(e.context(format!("failed to read {path}")));
         }
+        budget.remaining_bytes -= out.written;
         extracted.push(path);
         progress(extracted.len(), total)?;
     }
@@ -110,21 +131,27 @@ where
     Ok(extracted)
 }
 
-/// A writer that fails once more than `limit` bytes have gone through it.
+/// A writer that fails once more than `budget` allows for one entry has gone
+/// through it.
 struct CappedWriter<W> {
     inner: W,
     written: u64,
-    limit: u64,
+    budget: ExtractBudget,
 }
 
 impl<W: Write> Write for CappedWriter<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.written += buf.len() as u64;
-        if self.written > self.limit {
+        if self.written > self.budget.max_entry_bytes {
             return Err(io::Error::other(format!(
                 "entry is larger than {} bytes",
-                self.limit
+                self.budget.max_entry_bytes
             )));
+        }
+        if self.written > self.budget.remaining_bytes {
+            return Err(io::Error::other(
+                "extraction is larger than its total size limit",
+            ));
         }
         self.inner.write(buf)
     }
@@ -370,12 +397,16 @@ mod tests {
         fs::write(&pak_path, buf.into_inner()).unwrap();
         let out_dir = tmp.path().join("out");
 
-        let err = extract_capped(
+        let budget = ExtractBudget {
+            max_entry_bytes: 1024,
+            remaining_bytes: u64::MAX,
+        };
+        let err = extract_matching_within(
             &pak_path,
             |p| p == "bomb.bin",
             &out_dir,
             &|_, _| Ok(()),
-            1024,
+            &mut budget.clone(),
         )
         .unwrap_err();
         assert!(
@@ -384,14 +415,54 @@ mod tests {
         );
         assert!(!out_dir.join("bomb.bin").exists());
 
-        let ok = extract_capped(
+        let ok = extract_matching_within(
             &pak_path,
             |p| p == "small.txt",
             &out_dir,
             &|_, _| Ok(()),
-            1024,
+            &mut budget.clone(),
         );
         assert_eq!(ok.unwrap(), vec!["small.txt".to_string()]);
+    }
+
+    #[test]
+    fn stops_once_the_total_budget_is_spent_across_entries_and_paks() {
+        let mut buf = Cursor::new(Vec::new());
+        let mut writer =
+            Builder::new().writer(&mut buf, repak::Version::V11, "../../../".to_string(), None);
+        for name in ["a.bin", "b.bin"] {
+            writer
+                .write_file(name, false, vec![0u8; 600].as_slice())
+                .unwrap();
+        }
+        writer.write_index().unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let pak_path = tmp.path().join("two.pak");
+        fs::write(&pak_path, buf.into_inner()).unwrap();
+        let out_dir = tmp.path().join("out");
+        let mut budget = ExtractBudget {
+            max_entry_bytes: 1024,
+            remaining_bytes: 1500,
+        };
+
+        // 1200 bytes fit; the budget is then down to 300.
+        let ok =
+            extract_matching_within(&pak_path, |_| true, &out_dir, &|_, _| Ok(()), &mut budget);
+        assert_eq!(ok.unwrap().len(), 2);
+        assert_eq!(budget.remaining_bytes, 300);
+
+        // A second extraction sharing the budget can't write another 600.
+        let err = extract_matching_within(
+            &pak_path,
+            |p| p == "a.bin",
+            &tmp.path().join("again"),
+            &|_, _| Ok(()),
+            &mut budget,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("total size limit"), "{err:#}");
+        assert!(!tmp.path().join("again/a.bin").exists());
     }
 
     #[test]

@@ -123,11 +123,17 @@ pub fn build_catalog_from_pak_with_progress(
     building: &dyn Fn(usize, usize) -> anyhow::Result<()>,
 ) -> anyhow::Result<(Vec<Value>, CatalogStats)> {
     let workspace = tempfile::tempdir()?;
-    let extracted = crate::pak::extract_matching_with_progress(
+    // The game's catalog inputs add up to ~1.7 GB, the largest ~55 MB.
+    let mut budget = crate::pak::ExtractBudget {
+        max_entry_bytes: 256 << 20,
+        remaining_bytes: 8 << 30,
+    };
+    let extracted = crate::pak::extract_matching_within(
         pak,
         is_catalog_input,
         workspace.path(),
         extracting,
+        &mut budget,
     )?;
     if extracted.is_empty() {
         anyhow::bail!(

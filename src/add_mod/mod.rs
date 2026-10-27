@@ -142,11 +142,22 @@ where
         .collect::<anyhow::Result<Vec<usize>>>()?;
     let total: usize = counts.iter().sum();
 
+    // One budget for all the paks: the game's ~400 icon files add up to
+    // ~25 MB, the largest ~280 KB, so these leave room for high-resolution
+    // icon mods while stopping a decompression bomb from filling the disk.
+    let mut budget = pak::ExtractBudget {
+        max_entry_bytes: 64 << 20,
+        remaining_bytes: 2 << 30,
+    };
     let mut offset = 0;
     for (pak_path, count) in paks.iter().zip(&counts) {
-        pak::extract_matching_with_progress(pak_path, &keep, output_dir, &|done, _| {
-            progress(offset + done, total)
-        })?;
+        pak::extract_matching_within(
+            pak_path,
+            &keep,
+            output_dir,
+            &|done, _| progress(offset + done, total),
+            &mut budget,
+        )?;
         offset += count;
     }
     Ok(total)
