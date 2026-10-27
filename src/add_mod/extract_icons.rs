@@ -88,7 +88,9 @@ pub fn extract_icons(request: &ExtractIconsRequest) -> anyhow::Result<ExtractIco
 /// Decodes each of `items`' icons through `resolve` and writes it into
 /// `output` as `<code>.png`, with its subtype icon drawn over it when
 /// `subicons` is set. Fails before writing anything if a code isn't a plain
-/// file name, since codes come from the (possibly hostile) catalog.
+/// file name, or if two codes differ only in case (so would overwrite each
+/// other's file on Windows and macOS), since codes come from the (possibly
+/// hostile) catalog.
 fn write_icons<F>(
     items: &[CatalogIconItem],
     resolve: F,
@@ -100,6 +102,15 @@ where
 {
     if let Some(item) = items.iter().find(|item| !is_plain_file_name(&item.code)) {
         anyhow::bail!("catalog CodeName {:?} is not a plain file name", item.code);
+    }
+    let mut codes: HashMap<String, &str> = HashMap::with_capacity(items.len());
+    for item in items {
+        if let Some(other) = codes.insert(item.code.to_lowercase(), &item.code) {
+            anyhow::bail!(
+                "catalog CodeNames {other:?} and {:?} would be written to the same file",
+                item.code
+            );
+        }
     }
     std::fs::create_dir_all(output)?;
     let mut stats = ExtractIconsStats::default();
@@ -264,6 +275,26 @@ mod tests {
             assert!(!out.exists(), "{code:?}");
             assert!(!tmp.path().join("nested/escape.png").exists(), "{code:?}");
         }
+    }
+
+    #[test]
+    fn refuses_codes_differing_only_in_case_before_writing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (icon_path, file) = write_icon(tmp.path(), RIFLE, [0, 0, 0, 255]);
+        let items: Vec<_> = ["Rifle", "rifle"]
+            .into_iter()
+            .map(|code| CatalogIconItem {
+                code: code.to_string(),
+                ..items()[0].clone()
+            })
+            .collect();
+        let out = tmp.path().join("out");
+
+        let err =
+            write_icons(&items, resolver([(icon_path, file)].into()), false, &out).unwrap_err();
+
+        assert!(err.to_string().contains("same file"), "{err}");
+        assert!(!out.exists());
     }
 
     #[test]

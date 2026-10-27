@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Write};
 use std::path::{Component, Path, PathBuf};
@@ -91,17 +92,29 @@ where
     let mut file = BufReader::new(File::open(pak)?);
     let reader = PakBuilder::new().reader(&mut file)?;
 
-    let wanted: Vec<String> = reader
-        .files()
-        .into_iter()
-        .filter(|path| keep(path))
-        .collect();
+    // Every destination is checked before anything is written. On a
+    // case-insensitive filesystem (Windows, macOS) two entries differing only
+    // in case land on the same file, the second silently replacing the first;
+    // real paks have none, so that is refused too.
+    let mut wanted: Vec<(String, PathBuf)> = Vec::new();
+    let mut destinations: HashMap<String, usize> = HashMap::new();
+    for path in reader.files().into_iter().filter(|path| keep(path)) {
+        let dest = contained_path(output_dir, &path)?;
+        if let Some(other) =
+            destinations.insert(dest.to_string_lossy().to_lowercase(), wanted.len())
+        {
+            anyhow::bail!(
+                "{} and {path} would be extracted to the same file",
+                wanted[other].0
+            );
+        }
+        wanted.push((path, dest));
+    }
     let total = wanted.len();
     progress(0, total)?;
 
     let mut extracted = Vec::with_capacity(total);
-    for path in wanted {
-        let dest = contained_path(output_dir, &path)?;
+    for (path, dest) in wanted {
         if has_symlink_below(output_dir, &dest) {
             anyhow::bail!(
                 "{path} would be written through a symlink in {}",
@@ -485,6 +498,18 @@ mod tests {
             &mut budget.clone(),
         );
         assert_eq!(ok.unwrap(), vec!["small.txt".to_string()]);
+    }
+
+    #[test]
+    fn refuses_entries_differing_only_in_case_before_writing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pak_path = tmp.path().join("case.pak");
+        fs::write(&pak_path, build_pak_with(&["War/A.txt", "war/a.txt"])).unwrap();
+        let out_dir = tmp.path().join("out");
+
+        let err = extract(&pak_path, None, &out_dir).unwrap_err();
+        assert!(err.to_string().contains("same file"), "{err}");
+        assert!(!out_dir.exists());
     }
 
     #[cfg(unix)]
