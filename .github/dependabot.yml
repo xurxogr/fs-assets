@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # Workflows pin every action to a commit SHA (`@<sha> # vX`); this keeps
+  # those pins moving, one grouped PR per week.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
