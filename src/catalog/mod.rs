@@ -15,7 +15,6 @@ pub mod data_table_lookup;
 pub mod import_resolution;
 pub mod localization;
 pub mod pipeline;
-pub mod rules;
 pub mod stockpile_classifier;
 pub mod type_processing;
 pub mod utils;

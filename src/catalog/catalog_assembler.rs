@@ -19,12 +19,6 @@
 //! a whole catalog build is the caller's responsibility (e.g. by giving the
 //! `blueprint_loader` closure its own cache), exactly as documented on
 //! `blueprint_parser::AssetLoader` and `data_table_lookup::AssetLoader`.
-//!
-//! Notably, this module never calls into `crate::catalog::rules`
-//! (`CatalogRule`/`CatalogRuleSet`/`apply_rules`) — the final include/exclude
-//! field projection those implement is not part of this module's job:
-//! [`build_catalog`] returns the fully-assembled, merely filtered-and-cleaned
-//! entries.
 
 use std::collections::HashMap;
 
