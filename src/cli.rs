@@ -307,6 +307,24 @@ fn print_progress(progress: add_mod::Progress) {
     }
 }
 
+/// `error` and its causes on one line, `: `-separated, the way the CLI and
+/// the Python bindings report it. A cause whose text the previous message
+/// already ends with is skipped: `walkdir`'s errors, for one, repeat their
+/// `io::Error` both in their own message and as their cause.
+pub fn error_message(error: &anyhow::Error) -> String {
+    let mut message = String::new();
+    for cause in error.chain() {
+        let text = cause.to_string();
+        if message.is_empty() {
+            message = text;
+        } else if !message.ends_with(&text) {
+            message.push_str(": ");
+            message.push_str(&text);
+        }
+    }
+    message
+}
+
 pub fn run<I, T>(args: I) -> anyhow::Result<()>
 where
     I: IntoIterator<Item = T>,
@@ -520,6 +538,33 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn error_message_joins_the_chain_on_one_line() {
+        let error = anyhow::Error::from(std::io::Error::other("disk full"))
+            .context("writing out.json")
+            .context("build-catalog failed");
+        assert_eq!(
+            error_message(&error),
+            "build-catalog failed: writing out.json: disk full"
+        );
+    }
+
+    #[test]
+    fn error_message_skips_a_cause_the_message_already_ends_with() {
+        let missing = std::env::temp_dir().join("fs-assets-no-such-dir-for-test");
+        let walk_error = walkdir::WalkDir::new(&missing)
+            .into_iter()
+            .next()
+            .unwrap()
+            .unwrap_err();
+        let message = error_message(&anyhow::Error::from(walk_error));
+        assert!(
+            message.starts_with("IO error for operation on"),
+            "{message}"
+        );
+        assert_eq!(message.matches("os error 2").count(), 1, "{message}");
+    }
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("fs-assets").chain(args.iter().copied()))

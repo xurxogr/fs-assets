@@ -17,7 +17,7 @@ use crate::database::{ItemCategory, ItemFaction};
 use crate::{catalog, convert, database, grep, locres};
 
 fn to_py_err(e: anyhow::Error) -> PyErr {
-    PyErr::new::<PyRuntimeError, _>(e.to_string())
+    PyErr::new::<PyRuntimeError, _>(crate::cli::error_message(&e))
 }
 
 fn io_err(e: std::io::Error) -> PyErr {
@@ -679,7 +679,7 @@ fn cli_main(py: Python<'_>, argv: Vec<String>) -> i32 {
     py.detach(|| match crate::cli::run(argv) {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("Error: {}", e);
+            eprintln!("Error: {}", crate::cli::error_message(&e));
             1
         }
     })
