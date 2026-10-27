@@ -286,6 +286,14 @@ def test_read_templates_rejects_an_unsupported_resolution(tmp_path):
         fs_assets.read_templates(str(db), 1234)
 
 
+def test_cli_main_restores_the_sigint_handler(tmp_path):
+    import signal
+
+    before = signal.getsignal(signal.SIGINT)
+    assert fs_assets.cli_main(["fs-assets", "grep-strings", "x", str(tmp_path / "missing")]) == 1
+    assert signal.getsignal(signal.SIGINT) is before
+
+
 def test_path_arguments_accept_pathlib_paths(tmp_path):
     db = tmp_path / "database.h5"
     icon = _png(tmp_path / "rifle.png", 64, 64, (200, 100, 50, 255))

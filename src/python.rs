@@ -694,14 +694,38 @@ fn version() -> &'static str {
 ///     Process exit code (0 on success, 1 on error).
 #[pyfunction]
 fn cli_main(py: Python<'_>, argv: Vec<String>) -> i32 {
+    // Python's own SIGINT handler only raises once Python code runs again,
+    // which with the GIL released is after the whole command: Ctrl-C would
+    // be ignored. The default handler ends the process at once, as Ctrl-C
+    // does for the native binary.
+    let signal = py.import("signal").ok();
+    let previous_sigint = signal
+        .as_ref()
+        .and_then(|signal| swap_sigint_handler(signal, signal.getattr("SIG_DFL").ok()?));
     // Release the GIL: the CLI does blocking I/O for the whole call.
-    py.detach(|| match crate::cli::run(argv) {
+    let code = py.detach(|| match crate::cli::run(argv) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("Error: {}", crate::cli::error_message(&e));
             1
         }
-    })
+    });
+    if let (Some(signal), Some(previous)) = (&signal, previous_sigint) {
+        swap_sigint_handler(signal, previous);
+    }
+    code
+}
+
+/// Installs `handler` for SIGINT through the `signal` module and returns the
+/// one it replaced, or `None` if it couldn't (`signal.signal` only works on
+/// the main thread).
+fn swap_sigint_handler<'py>(
+    signal: &Bound<'py, PyModule>,
+    handler: Bound<'py, PyAny>,
+) -> Option<Bound<'py, PyAny>> {
+    signal
+        .call_method1("signal", (signal.getattr("SIGINT").ok()?, handler))
+        .ok()
 }
 
 /// Native extension behind the `fs_assets` Python package.
