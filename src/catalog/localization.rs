@@ -85,6 +85,16 @@ fn read_i64<R: Read>(r: &mut R) -> io::Result<i64> {
     Ok(i64::from_le_bytes(b))
 }
 
+/// Read `len` bytes, or `None` if the file ends first. The buffer grows as
+/// data actually arrives instead of reserving `len` up front: `len` comes
+/// from the file, so a hostile length can't make us allocate more than the
+/// file really holds.
+fn read_bytes<R: Read>(r: &mut R, len: usize) -> io::Result<Option<Vec<u8>>> {
+    let mut data = Vec::new();
+    r.take(len as u64).read_to_end(&mut data)?;
+    Ok((data.len() == len).then_some(data))
+}
+
 /// Read a UE4 `FString` — handles both ANSI and Unicode. Returns `Ok(None)`
 /// if the read was truncated (not an error — truncation is detected by
 /// length rather than raised).
@@ -100,11 +110,10 @@ fn read_fstring<R: Read>(r: &mut R) -> io::Result<Option<String>> {
 
     if length < 0 {
         // Unicode (UTF-16)
-        let char_count = (-length) as usize;
-        let mut data = vec![0u8; char_count * 2];
-        if !try_read_exact(r, &mut data)? {
+        // `unsigned_abs` so `i32::MIN` doesn't overflow the negation.
+        let Some(data) = read_bytes(r, length.unsigned_abs() as usize * 2)? else {
             return Ok(None);
-        }
+        };
         let units: Vec<u16> = data
             .as_chunks::<2>()
             .0
@@ -115,10 +124,9 @@ fn read_fstring<R: Read>(r: &mut R) -> io::Result<Option<String>> {
         Ok(Some(s.trim_end_matches('\0').to_string()))
     } else {
         // ANSI (Latin-1)
-        let mut data = vec![0u8; length as usize];
-        if !try_read_exact(r, &mut data)? {
+        let Some(data) = read_bytes(r, length as usize)? else {
             return Ok(None);
-        }
+        };
         let s: String = data.iter().map(|&b| b as char).collect();
         Ok(Some(s.trim_end_matches('\0').to_string()))
     }
@@ -139,7 +147,19 @@ fn read_string_array<R: Read + Seek>(r: &mut R, str_array_offset: i64) -> io::Re
     }
 
     let current_pos = r.stream_position()?;
-    r.seek(SeekFrom::Start(str_array_offset as u64))?;
+    let file_len = r.seek(SeekFrom::End(0))?;
+    let offset = u64::try_from(str_array_offset)
+        .ok()
+        .filter(|&offset| offset < file_len)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "string array offset {str_array_offset} is outside the file ({file_len} bytes)"
+                ),
+            )
+        })?;
+    r.seek(SeekFrom::Start(offset))?;
 
     let str_count = read_i32(r)?;
     for _ in 0..str_count {
@@ -707,6 +727,43 @@ mod tests {
 
             let lookup = LocalizationLookup::new(tmp.path(), None);
             assert_eq!(lookup.get("SOMEGUID", Some("en")), None);
+        }
+
+        /// A version-2 header with `str_array_offset`, followed by `rest`.
+        fn header(str_array_offset: i64, rest: &[u8]) -> Vec<u8> {
+            let mut buf = LOCRES_MAGIC.to_vec();
+            buf.push(2);
+            buf.extend_from_slice(&str_array_offset.to_le_bytes());
+            buf.extend_from_slice(rest);
+            buf
+        }
+
+        #[test]
+        fn hostile_counts_and_lengths_error_instead_of_allocating() {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("hostile.locres");
+            for length in [i32::MAX, i32::MIN, -1_000_000_000] {
+                let mut rest = 0u32.to_le_bytes().to_vec(); // entries count
+                rest.extend_from_slice(&u32::MAX.to_le_bytes()); // namespace count
+                rest.extend_from_slice(&0u32.to_le_bytes()); // namespace hash
+                rest.extend_from_slice(&length.to_le_bytes());
+                fs::write(&path, header(-1, &rest)).unwrap();
+                assert!(parse_locres_inner(&path).is_err(), "{length}");
+            }
+        }
+
+        #[test]
+        fn rejects_a_string_array_offset_outside_the_file() {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("offset.locres");
+            for offset in [-2, 1 << 40] {
+                fs::write(&path, header(offset, &[0; 8])).unwrap();
+                let err = parse_locres_inner(&path).unwrap_err();
+                assert!(
+                    err.to_string().contains("outside the file"),
+                    "{offset}: {err}"
+                );
+            }
         }
     }
 
