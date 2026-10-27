@@ -290,7 +290,6 @@ fn asset_source(extract_dir: Option<PathBuf>, paks: Vec<PathBuf>) -> Option<Asse
         .or_else(|| (!paks.is_empty()).then_some(AssetSource::Pak(paks)))
 }
 
-/// Prints an `add-mod` stage to stderr when it starts and when it ends.
 /// Writes `value` to `path` as pretty-printed JSON.
 fn write_json<T: serde::Serialize + ?Sized>(path: &Path, value: &T) -> anyhow::Result<()> {
     let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
@@ -299,6 +298,7 @@ fn write_json<T: serde::Serialize + ?Sized>(path: &Path, value: &T) -> anyhow::R
     Ok(())
 }
 
+/// Prints an `add-mod` stage to stderr when it starts and when it ends.
 fn print_progress(progress: add_mod::Progress) {
     if progress.done == 0 {
         eprintln!("{}: {} step(s)", progress.stage, progress.total);
