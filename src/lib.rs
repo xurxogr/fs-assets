@@ -5,6 +5,7 @@
 //! `fs_assets` Python package.
 
 pub mod add_mod;
+mod atomic_write;
 pub mod catalog;
 pub mod cli;
 pub mod convert;

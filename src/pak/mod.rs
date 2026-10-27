@@ -351,7 +351,7 @@ pub fn pack_with_progress(
     }
 
     writer.write_index()?.flush()?;
-    temp.persist(output)?;
+    crate::atomic_write::persist(temp.into_temp_path(), output)?;
     written.sort();
     Ok(written)
 }

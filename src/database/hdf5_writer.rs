@@ -59,8 +59,8 @@ fn vlen(s: &str) -> anyhow::Result<VarLenUnicode> {
 /// still produces a (metadata-only) group.
 ///
 /// The database is written to a temporary file next to `output_path` and
-/// renamed over it only once complete, so a failure partway through leaves
-/// any existing database untouched.
+/// renamed over it only once complete and flushed to disk, so a failure
+/// partway through, or a crash, leaves any existing database untouched.
 pub fn write_database(
     resolutions: &BTreeMap<i32, Vec<IconTemplate>>,
     output_path: &Path,
@@ -78,7 +78,7 @@ pub fn write_database(
     let file = hdf5::File::create(&temp_path)?;
     write_file(&file, resolutions)?;
     file.close()?;
-    temp_path.persist(output_path)?;
+    crate::atomic_write::persist(temp_path, output_path)?;
     Ok(())
 }
 
