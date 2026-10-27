@@ -196,7 +196,6 @@ pub fn is_guid(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     /// Writes a `.locres` holding `strings` as (key, text) pairs.
     fn create_mock_locres(filepath: &Path, strings: &[(&str, &str)]) {

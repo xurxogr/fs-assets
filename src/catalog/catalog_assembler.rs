@@ -747,7 +747,7 @@ pub fn sort_catalog(catalog: &mut [Value]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::localization::{self, LocalizationLookup};
+    use crate::catalog::localization::LocalizationLookup;
 
     fn no_loader(_: &str) -> Option<Value> {
         None

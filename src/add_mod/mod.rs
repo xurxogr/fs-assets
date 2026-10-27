@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use serde_json::Value;
 
-use crate::database::pipeline::{overlay_icon_paths, DatabaseBuildStats};
+use crate::database::pipeline::{main_icon_paths, overlay_icon_paths, DatabaseBuildStats};
 use crate::{database, pak};
 
 /// Where one side of an `add-mod` run (the mod itself, or the vanilla
@@ -120,13 +120,7 @@ pub struct AddModRequest {
 /// build may try to decode.
 pub fn referenced_icon_paths(catalog: &[Value]) -> HashSet<String> {
     let mut paths = overlay_icon_paths(catalog);
-    paths.extend(
-        catalog
-            .iter()
-            .filter_map(database::derive_catalog_icon_item)
-            .map(|item| item.icon_path)
-            .filter(|path| !path.is_empty()),
-    );
+    paths.extend(main_icon_paths(catalog));
     paths
 }
 

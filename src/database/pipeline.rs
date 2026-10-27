@@ -99,6 +99,17 @@ pub fn filesystem_icon_loader_with_fallback<'a>(
     }
 }
 
+/// Every main icon object path `catalog`'s items use. Unlike overlays,
+/// these always come from the mod itself, never from vanilla.
+pub fn main_icon_paths(catalog: &[Value]) -> HashSet<String> {
+    catalog
+        .iter()
+        .filter_map(database::derive_catalog_icon_item)
+        .map(|item| item.icon_path)
+        .filter(|path| !path.is_empty())
+        .collect()
+}
+
 /// Every overlay icon object path `catalog` may blend into a template: the
 /// items' subtype icons plus the shared crate icon. These, unlike main
 /// icons, may come from vanilla when a mod doesn't ship them.
