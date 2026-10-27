@@ -522,6 +522,8 @@ pub fn modify_icon_in_database(
     remove: bool,
     output_path: &Path,
 ) -> anyhow::Result<()> {
+    database::check_template_name("code", &identity.code)?;
+    database::check_template_name("mod name", &identity.mod_name)?;
     let existing = if output_path.exists() {
         hdf5_writer::read_database(output_path)?
     } else {
@@ -1498,6 +1500,26 @@ mod tests {
                 false,
                 "vanilla",
             )
+        }
+
+        #[test]
+        fn unstorable_names_are_refused_before_touching_the_database() {
+            let tmp = tempfile::tempdir().unwrap();
+            let output = tmp.path().join("out.h5");
+            let empty_mod = IconIdentity {
+                mod_name: String::new(),
+                ..rifle()
+            };
+            let nul_code = IconIdentity {
+                code: "Ri\0fle".to_string(),
+                ..rifle()
+            };
+            for identity in [empty_mod, nul_code] {
+                let result =
+                    modify_icon_in_database(&identity, None, &[1080], false, true, &output);
+                assert!(result.is_err(), "{identity:?}");
+                assert!(!output.exists());
+            }
         }
 
         #[test]

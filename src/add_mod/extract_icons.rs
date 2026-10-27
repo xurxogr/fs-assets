@@ -57,6 +57,7 @@ pub fn extract_icons(
         .filter_map(database::derive_catalog_icon_item)
         .filter(|item| !item.icon_path.is_empty())
         .collect();
+    check_codes(&items)?;
     let subicon_paths: HashSet<String> = items
         .iter()
         .filter(|_| request.subicons)
@@ -98,22 +99,10 @@ pub fn extract_icons(
     )
 }
 
-/// Decodes each of `items`' icons through `resolve` and writes it into
-/// `output` as `<code>.png`, with its subtype icon drawn over it when
-/// `subicons` is set. Fails before writing anything if a code isn't a plain
-/// file name, or if two codes differ only in case (so would overwrite each
-/// other's file on Windows and macOS), since codes come from the (possibly
-/// hostile) catalog.
-fn write_icons<F>(
-    items: &[CatalogIconItem],
-    resolve: F,
-    subicons: bool,
-    output: &Path,
-    progress: &dyn Fn(usize, usize) -> anyhow::Result<()>,
-) -> anyhow::Result<ExtractIconsStats>
-where
-    F: Fn(&str) -> Option<PathBuf>,
-{
+/// Fails if a code of `items` isn't a plain file name, or if two codes differ
+/// only in case (so would overwrite each other's file on Windows and macOS),
+/// since codes come from the (possibly hostile) catalog and name the PNGs.
+fn check_codes(items: &[CatalogIconItem]) -> anyhow::Result<()> {
     if let Some(item) = items.iter().find(|item| !is_plain_file_name(&item.code)) {
         anyhow::bail!("catalog CodeName {:?} is not a plain file name", item.code);
     }
@@ -126,6 +115,22 @@ where
             );
         }
     }
+    Ok(())
+}
+
+/// Decodes each of `items`' icons through `resolve` and writes it into
+/// `output` as `<code>.png`, with its subtype icon drawn over it when
+/// `subicons` is set. `items`' codes must have passed [`check_codes`].
+fn write_icons<F>(
+    items: &[CatalogIconItem],
+    resolve: F,
+    subicons: bool,
+    output: &Path,
+    progress: &dyn Fn(usize, usize) -> anyhow::Result<()>,
+) -> anyhow::Result<ExtractIconsStats>
+where
+    F: Fn(&str) -> Option<PathBuf>,
+{
     std::fs::create_dir_all(output)?;
     let mut stats = ExtractIconsStats::default();
     let mut subicon_cache: HashMap<String, Option<DynamicImage>> = HashMap::new();
@@ -278,33 +283,18 @@ mod tests {
             "NUL",
             "com1",
             "Rifle.",
+            "nul\0byte",
         ] {
-            let tmp = tempfile::tempdir().unwrap();
-            let (icon_path, file) = write_icon(tmp.path(), RIFLE, [0, 0, 0, 255]);
             let items = vec![CatalogIconItem {
                 code: code.to_string(),
                 ..items()[0].clone()
             }];
-            let out = tmp.path().join("nested/out");
-
-            let result = write_icons(
-                &items,
-                resolver([(icon_path, file)].into()),
-                false,
-                &out,
-                &|_, _| Ok(()),
-            );
-
-            assert!(result.is_err(), "{code:?}");
-            assert!(!out.exists(), "{code:?}");
-            assert!(!tmp.path().join("nested/escape.png").exists(), "{code:?}");
+            assert!(check_codes(&items).is_err(), "{code:?}");
         }
     }
 
     #[test]
-    fn refuses_codes_differing_only_in_case_before_writing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (icon_path, file) = write_icon(tmp.path(), RIFLE, [0, 0, 0, 255]);
+    fn refuses_codes_differing_only_in_case() {
         let items: Vec<_> = ["Rifle", "rifle"]
             .into_iter()
             .map(|code| CatalogIconItem {
@@ -312,19 +302,36 @@ mod tests {
                 ..items()[0].clone()
             })
             .collect();
-        let out = tmp.path().join("out");
 
-        let err = write_icons(
-            &items,
-            resolver([(icon_path, file)].into()),
-            false,
-            &out,
-            &|_, _| Ok(()),
-        )
-        .unwrap_err();
+        let err = check_codes(&items).unwrap_err();
 
         assert!(err.to_string().contains("same file"), "{err}");
-        assert!(!out.exists());
+    }
+
+    /// A bad code fails the run before any pak is read, not after the
+    /// extraction it would otherwise waste.
+    #[test]
+    fn a_bad_code_fails_before_extracting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pak_path = write_pak(tmp.path(), "a.pak", &[&format!("{RIFLE}.uasset")]);
+        let mut request = request(AssetSource::Pak(vec![pak_path]), tmp.path(), false);
+        std::fs::write(
+            &request.catalog,
+            json!([{"CodeName": "../escape", "Icon": RIFLE}]).to_string(),
+        )
+        .unwrap();
+        request.output = tmp.path().join("nested/out");
+
+        let reports = std::cell::Cell::new(0);
+        let err = extract_icons(&request, &|_| {
+            reports.set(reports.get() + 1);
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert!(err.to_string().contains("not a plain file name"), "{err}");
+        assert_eq!(reports.get(), 0);
+        assert!(!request.output.exists());
     }
 
     #[test]

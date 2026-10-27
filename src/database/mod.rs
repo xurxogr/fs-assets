@@ -146,6 +146,20 @@ pub fn normalize_icon_path(path: &str) -> String {
     }
 }
 
+/// Fails unless `value` can name a template in the database: not empty, and
+/// free of `\0`, which HDF5 strings can't hold. `what` names the value in the
+/// error. Checked before any work, so a bad catalog code or mod name fails at
+/// once rather than when the database is finally written.
+pub fn check_template_name(what: &str, value: &str) -> anyhow::Result<()> {
+    if value.is_empty() {
+        anyhow::bail!("{what} is empty");
+    }
+    if value.contains('\0') {
+        anyhow::bail!("{what} {value:?} contains a NUL character");
+    }
+    Ok(())
+}
+
 /// Derives a [`CatalogIconItem`] from one `catalog.json` entry (a
 /// `serde_json::Value` object, matching the shape emitted by
 /// `crate::catalog::catalog_assembler::clean_entry`). Returns `None` when the

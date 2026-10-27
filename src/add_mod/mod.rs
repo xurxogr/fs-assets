@@ -197,7 +197,14 @@ pub fn add_mod(
     progress: &dyn Fn(Progress) -> anyhow::Result<()>,
 ) -> anyhow::Result<DatabaseBuildStats> {
     let resolutions = database::resolve_resolutions(&request.resolutions)?;
+    database::check_template_name("mod name", &request.mod_name)?;
     let catalog = load_catalog(&request.catalog)?;
+    for item in catalog
+        .iter()
+        .filter_map(database::derive_catalog_icon_item)
+    {
+        database::check_template_name("catalog CodeName", &item.code)?;
+    }
     let icons = referenced_icon_paths(&catalog);
     let workspace = tempfile::tempdir()?;
     let report =
@@ -394,6 +401,44 @@ mod tests {
 
         assert!(err.to_string().contains("no entries"));
         assert!(!request.db.exists());
+    }
+
+    #[test]
+    fn unstorable_names_fail_before_extracting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pak_path = write_pak(tmp.path(), "mod.pak", &[&format!("{RIFLE_ICON}.uasset")]);
+        let bad_catalog = tmp.path().join("bad.json");
+        std::fs::write(
+            &bad_catalog,
+            json!([{"CodeName": "Ri\0fle", "Icon": RIFLE_ICON}]).to_string(),
+        )
+        .unwrap();
+
+        let empty_mod_name = AddModRequest {
+            mod_name: String::new(),
+            ..request(
+                AssetSource::Pak(vec![pak_path.clone()]),
+                write_catalog(tmp.path()),
+                tmp.path().join("database.h5"),
+            )
+        };
+        let nul_code = request(
+            AssetSource::Pak(vec![pak_path]),
+            bad_catalog,
+            tmp.path().join("database.h5"),
+        );
+        for (request, expected) in [(empty_mod_name, "mod name is empty"), (nul_code, "NUL")] {
+            let reports = std::cell::Cell::new(0);
+            let err = add_mod(&request, &|_| {
+                reports.set(reports.get() + 1);
+                Ok(())
+            })
+            .unwrap_err();
+
+            assert!(err.to_string().contains(expected), "{err}");
+            assert_eq!(reports.get(), 0);
+            assert!(!request.db.exists());
+        }
     }
 
     #[test]
