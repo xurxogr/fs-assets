@@ -19,8 +19,9 @@
 //! `crate::catalog::utils::parse_reference` parses those back into raw
 //! indices.
 
-use std::collections::HashSet;
-use std::ffi::OsStr;
+use std::cell::OnceCell;
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
@@ -389,54 +390,84 @@ pub fn compute_object_path(blueprints_dir: &Path, asset_path: &Path) -> String {
     asset_path.to_string_lossy().to_string()
 }
 
-/// Resolve a requested asset path to its actual on-disk location, searching
-/// one level of subdirectories if the direct path doesn't exist: some
-/// blueprints have `ObjectPath`s that
-/// don't match their actual file location (e.g.
-/// `Structures/BPEmplacedATW.uasset` actually living at
-/// `Structures/Emplacements/BPEmplacedATW.uasset`).
-pub fn find_blueprint_path(blueprints_dir: &Path, requested: &Path) -> Option<PathBuf> {
-    if requested.exists() {
-        return Some(requested.to_path_buf());
-    }
-
-    let rel_path = requested.strip_prefix(blueprints_dir).ok()?;
-    let mut components = rel_path.components();
-    let first = components.next()?;
-    // Only search if there's at least one more component after the first
-    // (i.e. the file isn't directly at the top level already).
-    components.next()?;
-
-    let filename = requested.file_name()?;
-    let parent_dir = blueprints_dir.join(first);
-    if parent_dir.is_dir() {
-        return find_file_recursive(&parent_dir, filename);
-    }
-
-    None
+/// Resolves requested blueprint paths under one `Blueprints` directory to
+/// their actual files. Some blueprints have `ObjectPath`s that don't match
+/// where the file lives (e.g. `Structures/BPEmplacedATW.uasset` actually at
+/// `Structures/Emplacements/BPEmplacedATW.uasset`), so a path that doesn't
+/// exist is looked up by file name anywhere under its top-level directory.
+///
+/// The file names are indexed on the first such miss, with one walk of the
+/// tree: walking it again for every missing path would let an asset that
+/// references many nonexistent blueprints cost a full walk each.
+pub struct BlueprintFinder<'a> {
+    blueprints_dir: &'a Path,
+    by_name: OnceCell<HashMap<OsString, Vec<PathBuf>>>,
 }
 
-fn find_file_recursive(dir: &Path, filename: &OsStr) -> Option<PathBuf> {
-    // `walkdir` doesn't follow symlinks (so a link back up the tree can't
-    // loop) and walks without recursing.
-    walkdir::WalkDir::new(dir)
-        .into_iter()
-        .flatten()
-        .find(|entry| entry.file_type().is_file() && entry.file_name() == filename)
-        .map(walkdir::DirEntry::into_path)
+impl<'a> BlueprintFinder<'a> {
+    pub fn new(blueprints_dir: &'a Path) -> Self {
+        Self {
+            blueprints_dir,
+            by_name: OnceCell::new(),
+        }
+    }
+
+    /// `requested` itself if it exists, else the first (in path order) file
+    /// of the same name under `requested`'s top-level directory, if any.
+    pub fn find(&self, requested: &Path) -> Option<PathBuf> {
+        if requested.exists() {
+            return Some(requested.to_path_buf());
+        }
+
+        let rel_path = requested.strip_prefix(self.blueprints_dir).ok()?;
+        let mut components = rel_path.components();
+        let first = components.next()?;
+        // Only search if there's at least one more component after the first
+        // (i.e. the file isn't directly at the top level already).
+        components.next()?;
+
+        let top_dir = self.blueprints_dir.join(first);
+        self.by_name()
+            .get(requested.file_name()?)?
+            .iter()
+            .find(|path| path.starts_with(&top_dir))
+            .cloned()
+    }
+
+    /// Every regular file under the directory, by file name, each list in
+    /// path order. `walkdir` doesn't follow symlinks, so a link back up the
+    /// tree can't loop and a linked file isn't indexed.
+    fn by_name(&self) -> &HashMap<OsString, Vec<PathBuf>> {
+        self.by_name.get_or_init(|| {
+            let mut by_name: HashMap<OsString, Vec<PathBuf>> = HashMap::new();
+            for entry in walkdir::WalkDir::new(self.blueprints_dir)
+                .sort_by_file_name()
+                .into_iter()
+                .flatten()
+                .filter(|entry| entry.file_type().is_file())
+            {
+                by_name
+                    .entry(entry.file_name().to_owned())
+                    .or_default()
+                    .push(entry.into_path());
+            }
+            by_name
+        })
+    }
 }
 
 /// Builds a filesystem-backed [`AssetLoader`]: maps a `/Game/Blueprints/...`
-/// object path to `<blueprints_dir>/<relative>.uasset`, applying the same
-/// subdirectory search as [`find_blueprint_path`], then parses it via
+/// object path to `<blueprints_dir>/<relative>.uasset`, resolved through a
+/// [`BlueprintFinder`], then parses it via
 /// `crate::convert::uasset_to_full_json`. Returns `None` (a cache-miss, in
 /// `AssetLoader` terms) for paths outside `/Game/Blueprints/`, for files that
 /// don't exist, or for files that fail to parse (with a warning; see
 /// `catalog::utils::load_full_json`).
 pub fn filesystem_loader(blueprints_dir: &Path) -> impl Fn(&str) -> Option<Value> + '_ {
+    let finder = BlueprintFinder::new(blueprints_dir);
     move |object_path: &str| {
         let candidate = blueprint_candidate(blueprints_dir, object_path)?;
-        let resolved = find_blueprint_path(blueprints_dir, &candidate)?;
+        let resolved = finder.find(&candidate)?;
         load_full_json(blueprints_dir, &resolved)
     }
 }
@@ -942,7 +973,7 @@ mod tests {
         }
     }
 
-    mod find_blueprint_path_tests {
+    mod blueprint_finder_tests {
         use super::*;
 
         #[test]
@@ -953,7 +984,10 @@ mod tests {
             let direct = blueprints_dir.join("Items/BPFoo.uasset");
             std::fs::write(&direct, b"x").unwrap();
 
-            assert_eq!(find_blueprint_path(&blueprints_dir, &direct), Some(direct));
+            assert_eq!(
+                BlueprintFinder::new(&blueprints_dir).find(&direct),
+                Some(direct)
+            );
         }
 
         #[test]
@@ -966,9 +1000,55 @@ mod tests {
 
             let requested = blueprints_dir.join("Structures/BPTurret.uasset");
             assert_eq!(
-                find_blueprint_path(&blueprints_dir, &requested),
+                BlueprintFinder::new(&blueprints_dir).find(&requested),
                 Some(actual)
             );
+        }
+
+        #[test]
+        fn picks_the_first_match_in_path_order() {
+            let tmp = tempfile_dir();
+            let blueprints_dir = tmp.join("Blueprints");
+            for sub in ["Structures/B", "Structures/A"] {
+                std::fs::create_dir_all(blueprints_dir.join(sub)).unwrap();
+                std::fs::write(blueprints_dir.join(sub).join("BPTurret.uasset"), b"x").unwrap();
+            }
+            // Same name outside the requested top-level directory: not a match.
+            std::fs::create_dir_all(blueprints_dir.join("Items")).unwrap();
+            std::fs::write(blueprints_dir.join("Items/BPGun.uasset"), b"x").unwrap();
+            let finder = BlueprintFinder::new(&blueprints_dir);
+
+            assert_eq!(
+                finder.find(&blueprints_dir.join("Structures/BPTurret.uasset")),
+                Some(blueprints_dir.join("Structures/A/BPTurret.uasset"))
+            );
+            assert_eq!(
+                finder.find(&blueprints_dir.join("Structures/BPGun.uasset")),
+                None
+            );
+        }
+
+        /// The tree is walked once, on the first miss: a file added after
+        /// that is only found by its direct path.
+        #[test]
+        fn indexes_the_tree_once() {
+            let tmp = tempfile_dir();
+            let blueprints_dir = tmp.join("Blueprints");
+            std::fs::create_dir_all(blueprints_dir.join("Items/Sub")).unwrap();
+            let finder = BlueprintFinder::new(&blueprints_dir);
+            assert_eq!(
+                finder.find(&blueprints_dir.join("Items/BPLate.uasset")),
+                None
+            );
+
+            let late = blueprints_dir.join("Items/Sub/BPLate.uasset");
+            std::fs::write(&late, b"x").unwrap();
+
+            assert_eq!(
+                finder.find(&blueprints_dir.join("Items/BPLate.uasset")),
+                None
+            );
+            assert_eq!(finder.find(&late), Some(late.clone()));
         }
 
         #[test]
@@ -977,7 +1057,7 @@ mod tests {
             let blueprints_dir = tmp.join("Blueprints");
             std::fs::create_dir_all(&blueprints_dir).unwrap();
             let requested = blueprints_dir.join("Missing/BPGone.uasset");
-            assert_eq!(find_blueprint_path(&blueprints_dir, &requested), None);
+            assert_eq!(BlueprintFinder::new(&blueprints_dir).find(&requested), None);
         }
 
         #[test]
@@ -1024,7 +1104,7 @@ mod tests {
             .unwrap();
 
             let requested = blueprints_dir.join("Structures/BPGone.uasset");
-            assert_eq!(find_blueprint_path(&blueprints_dir, &requested), None);
+            assert_eq!(BlueprintFinder::new(&blueprints_dir).find(&requested), None);
         }
 
         fn tempfile_dir() -> PathBuf {
