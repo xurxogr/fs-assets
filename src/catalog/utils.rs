@@ -298,30 +298,42 @@ pub fn parse_reference(ref_string: &str) -> Option<i64> {
 /// must be a negative import index; `imports` is the raw imports array from
 /// JSON.
 pub fn resolve_import_path(import_index: i64, imports: &[Value]) -> Option<String> {
+    let mut current = import_at(import_index, imports)?;
+    let mut names = Vec::new();
+    loop {
+        names.push(
+            current
+                .get("ObjectName")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
+        // A chain longer than the imports table must revisit an entry: an
+        // `OuterIndex` cycle in a malformed asset, which would otherwise be
+        // followed forever.
+        if names.len() > imports.len() {
+            return None;
+        }
+        let outer_index = current
+            .get("OuterIndex")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        match import_at(outer_index, imports) {
+            Some(outer) => current = outer,
+            None => break,
+        }
+    }
+    names.reverse();
+    Some(names.join("/"))
+}
+
+/// The import a negative `import_index` points at, or `None` for a
+/// non-negative or out-of-range index.
+fn import_at(import_index: i64, imports: &[Value]) -> Option<&Value> {
     if import_index >= 0 {
         return None;
     }
-
-    let index = (-import_index) as usize - 1;
-    let import_obj = imports.get(index)?;
-
-    let object_name = import_obj
-        .get("ObjectName")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let outer_index = import_obj
-        .get("OuterIndex")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-
-    if outer_index < 0 {
-        if let Some(outer_path) = resolve_import_path(outer_index, imports) {
-            return Some(format!("{outer_path}/{object_name}"));
-        }
-        return Some(object_name.to_string());
-    }
-
-    Some(object_name.to_string())
+    let index = usize::try_from(import_index.unsigned_abs() - 1).ok()?;
+    imports.get(index)
 }
 
 #[cfg(test)]
@@ -578,6 +590,28 @@ mod tests {
                 resolve_import_path(-2, &imports),
                 Some("Root/Child".to_string())
             );
+        }
+
+        #[test]
+        fn returns_none_for_self_referencing_outer() {
+            let imports = vec![json!({"ObjectName": "Loop", "OuterIndex": -1})];
+            assert_eq!(resolve_import_path(-1, &imports), None);
+        }
+
+        #[test]
+        fn returns_none_for_outer_cycle() {
+            let imports = vec![
+                json!({"ObjectName": "A", "OuterIndex": -2}),
+                json!({"ObjectName": "B", "OuterIndex": -1}),
+                json!({"ObjectName": "C", "OuterIndex": -1}),
+            ];
+            assert_eq!(resolve_import_path(-3, &imports), None);
+        }
+
+        #[test]
+        fn returns_none_for_min_index() {
+            let imports = vec![json!({"ObjectName": "Test", "OuterIndex": 0})];
+            assert_eq!(resolve_import_path(i64::MIN, &imports), None);
         }
 
         #[test]
