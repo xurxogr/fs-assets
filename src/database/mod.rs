@@ -607,9 +607,9 @@ pub fn build_icon_templates(
 }
 
 /// An item's main icon and overlays converted once for every resolution its
-/// templates are built at: the icon as RGBA, the overlays tinted (see
-/// [`tint_overlay`]), and a blank placeholder subicon (see
-/// [`is_blank_subicon`]) dropped.
+/// templates are built at: the icon as RGBA, the overlays with their color
+/// tint applied, and a blank placeholder subicon (see [`is_blank_subicon`])
+/// dropped.
 pub struct PreparedIcon {
     image: RgbaImage,
     subicon: Option<RgbaImage>,
