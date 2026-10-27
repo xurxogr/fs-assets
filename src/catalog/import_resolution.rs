@@ -3,7 +3,7 @@
 //! These are pure lookups over the raw imports array — they hold no parser
 //! state (no caches, no logger).
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::catalog::utils::normalize_object_path;
 
@@ -69,6 +69,20 @@ pub fn resolve_import_asset_path(import_obj: &Value, all_imports: &[Value]) -> O
     }
 
     None
+}
+
+/// `uasset_to_full_json` imports use snake_case fields (`object_name`,
+/// `class_name`, `outer_index`), while this module's functions and
+/// `crate::catalog::utils::resolve_import_path` operate on the PascalCase
+/// shape (`ObjectName`, `ClassName`, `OuterIndex`). Rather than re-deriving
+/// that (already-tested) resolution logic against the new field names,
+/// callers adapt the value shape with this and delegate to it directly.
+pub(crate) fn to_pascalcase_import(import_obj: &Value) -> Value {
+    json!({
+        "ClassName": import_obj.get("class_name").cloned().unwrap_or(Value::Null),
+        "ObjectName": import_obj.get("object_name").cloned().unwrap_or(Value::Null),
+        "OuterIndex": import_obj.get("outer_index").cloned().unwrap_or(json!(0)),
+    })
 }
 
 #[cfg(test)]

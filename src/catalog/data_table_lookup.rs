@@ -32,7 +32,7 @@ use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
-use crate::catalog::import_resolution::resolve_import_asset_path;
+use crate::catalog::import_resolution::{resolve_import_asset_path, to_pascalcase_import};
 use crate::catalog::utils::{parse_reference, resolve_import_path};
 
 // -- Data table file names (relative to the Data directory, no extension:
@@ -248,18 +248,6 @@ pub fn resolve_damage_type_import(ammo_asset: &Value, code_name: &str) -> Option
     let imports = ammo_asset.get("imports")?.as_array()?;
     let adapted: Vec<Value> = imports.iter().map(to_pascalcase_import).collect();
     resolve_import_path(ref_idx, &adapted)
-}
-
-/// `uasset_to_full_json` imports use snake_case fields (`object_name`,
-/// `outer_index`); `crate::catalog::utils::resolve_import_path` expects the
-/// PascalCase shape (`ObjectName`, `OuterIndex`). Adapt rather than re-deriving that already-tested logic,
-/// mirroring `blueprint_parser::to_pascalcase_import`.
-fn to_pascalcase_import(import_obj: &Value) -> Value {
-    json!({
-        "ClassName": import_obj.get("class_name").cloned().unwrap_or(Value::Null),
-        "ObjectName": import_obj.get("object_name").cloned().unwrap_or(Value::Null),
-        "OuterIndex": import_obj.get("outer_index").cloned().unwrap_or(json!(0)),
-    })
 }
 
 // ---------------------------------------------------------------------

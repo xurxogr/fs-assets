@@ -106,7 +106,10 @@ fn extract_catalog_data_impl(
 
     // Step 2: ParentBlueprint via ClassIndex(-by-name) -> SuperIndex chain.
     // Adapted once per asset: every import lookup below reads this shape.
-    let imports: Vec<Value> = imports.iter().map(to_pascalcase_import).collect();
+    let imports: Vec<Value> = imports
+        .iter()
+        .map(import_resolution::to_pascalcase_import)
+        .collect();
     let parent_path = resolve_parent_blueprint(default_export, exports, &imports);
     if let Some(ref p) = parent_path {
         catalog_data.insert("ParentBlueprint".to_string(), json!(p));
@@ -228,21 +231,6 @@ fn process_imports(imports: &[Value]) -> Vec<Option<String>> {
         .collect()
 }
 
-/// `uasset_to_full_json` imports use snake_case fields (`object_name`,
-/// `class_name`, `outer_index`); `crate::catalog::import_resolution`'s
-/// functions operate on the PascalCase shape (`ObjectName`, `ClassName`,
-/// `OuterIndex`). Rather than re-deriving that
-/// (already-tested) resolution logic against the new field names, adapt the
-/// value shape and delegate to it directly. Done once per asset, in
-/// `extract_catalog_data_impl`: each resolution reads the whole array.
-fn to_pascalcase_import(import_obj: &Value) -> Value {
-    json!({
-        "ClassName": import_obj.get("class_name").cloned().unwrap_or(Value::Null),
-        "ObjectName": import_obj.get("object_name").cloned().unwrap_or(Value::Null),
-        "OuterIndex": import_obj.get("outer_index").cloned().unwrap_or(json!(0)),
-    })
-}
-
 /// A processed value is worth keeping in "simple" (non-full-extraction) mode
 /// only if it's non-empty — a truthiness check specialized to the only two
 /// variants `process_data` ever recurses
@@ -260,7 +248,8 @@ fn is_nonempty(value: &Value) -> bool {
 ///
 /// `processed_imports` is this asset's `imports` array pre-resolved to
 /// blueprint paths (or `None`); `exports` is the raw exports array and
-/// `imports` the imports adapted by [`to_pascalcase_import`], both used only
+/// `imports` the imports adapted by
+/// [`import_resolution::to_pascalcase_import`], both used only
 /// in `full_extraction` mode to resolve export references to object names
 /// and to fall back to non-blueprint asset-path resolution.
 fn process_data(
