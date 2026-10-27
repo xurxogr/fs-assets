@@ -1,8 +1,9 @@
 //! Filesystem-backed `add-mod` pipeline: resolves catalog icon paths to real
 //! `.uasset` files under an extraction directory, decodes them via
-//! `crate::convert::uasset_to_png` (already verified pixel-exact against the
-//! full real icon corpus — see that module's docs), then resizes/hashes/
-//! writes the result to HDF5 via `crate::database::hdf5_writer`.
+//! `crate::convert::uasset_to_image` (the decode behind `uasset_to_png`,
+//! already verified pixel-exact against the full real icon corpus — see that
+//! module's docs), then resizes/hashes/writes the result to HDF5 via
+//! `crate::database::hdf5_writer`.
 //!
 //! There is deliberately no separate "build a database from scratch" entry
 //! point: creating the very first mod's database and merging in the Nth
@@ -137,17 +138,14 @@ pub fn decode_icon(path: &Path) -> anyhow::Result<image::DynamicImage> {
 /// Decodes a `.uasset` texture, turning a decoder panic into an error.
 fn decode_uasset_icon(path: &Path) -> anyhow::Result<image::DynamicImage> {
     let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        crate::convert::uasset_to_png(path)
+        crate::convert::uasset_to_image(path)
     }));
 
-    let png_bytes = match decoded {
-        Ok(Ok(bytes)) => bytes,
+    match decoded {
+        Ok(Ok(image)) => Ok(image),
         Ok(Err(e)) => anyhow::bail!("failed to decode icon {}: {e}", path.display()),
         Err(_) => anyhow::bail!("panicked while decoding icon {}", path.display()),
-    };
-
-    image::load_from_memory(&png_bytes)
-        .map_err(|e| anyhow::anyhow!("failed to parse decoded PNG for {}: {e}", path.display()))
+    }
 }
 
 /// Resolves, decodes, and caches (by `path`) an icon that's allowed to be

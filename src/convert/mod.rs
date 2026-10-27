@@ -857,7 +857,7 @@ fn find_texture2d_export_range(path: &Path) -> Option<(usize, usize)> {
 /// extra per-mip or per-platform-data field (streaming/VT-related) that
 /// only appears for some textures, but that's speculation, not something
 /// verified against bytes.
-fn decode_compressed_mip0(path: &Path) -> anyhow::Result<Vec<u8>> {
+fn decode_compressed_mip0(path: &Path) -> anyhow::Result<image::RgbaImage> {
     let bytes = std::fs::read(path)?;
 
     let (range_start, range_end) = find_texture2d_export_range(path).ok_or_else(|| {
@@ -977,20 +977,14 @@ fn decode_compressed_mip0(path: &Path) -> anyhow::Result<Vec<u8>> {
         }
     }
 
-    let image = image::RgbaImage::from_raw(width as u32, height as u32, rgba).ok_or_else(|| {
+    image::RgbaImage::from_raw(width as u32, height as u32, rgba).ok_or_else(|| {
         anyhow::anyhow!(
             "{}: decoded pixel buffer size didn't match {}x{}",
             path.display(),
             width,
             height
         )
-    })?;
-
-    let mut out = Vec::new();
-    image
-        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
-        .map_err(|e| anyhow::anyhow!("failed to encode PNG for {}: {e}", path.display()))?;
-    Ok(out)
+    })
 }
 
 /// Texture -> PNG export.
@@ -1045,6 +1039,17 @@ fn decode_compressed_mip0(path: &Path) -> anyhow::Result<Vec<u8>> {
 /// `sig + Len` in bounds, and the PNG actually ends with `IEND` at that
 /// exact position) before it's accepted.
 pub fn uasset_to_png(path: &Path) -> anyhow::Result<Vec<u8>> {
+    let image = uasset_to_image(path)?;
+    let mut out = Vec::new();
+    image
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .map_err(|e| anyhow::anyhow!("failed to encode PNG for {}: {e}", path.display()))?;
+    Ok(out)
+}
+
+/// Decodes a `.uasset` texture to an in-memory image, the way
+/// [`uasset_to_png`] finds it, without encoding it to PNG.
+pub fn uasset_to_image(path: &Path) -> anyhow::Result<image::DynamicImage> {
     // The embedded-PNG scan reads raw file bytes and never needs
     // `unreal_asset` to parse the file: one of the three real fixtures it was
     // tested against (`ResearchPartIcon.uasset`) fails to fully parse via
@@ -1075,20 +1080,12 @@ pub fn uasset_to_png(path: &Path) -> anyhow::Result<Vec<u8>> {
         }
         let png_bytes = &file_bytes[sig_offset..png_end];
 
-        // Decode-then-re-encode (rather than passing the embedded bytes
-        // through untouched) so this exercises real pixel decoding and so a
-        // corrupt/truncated embedded blob is caught here instead of
+        // Decoded (rather than the embedded bytes passed through untouched)
+        // so a corrupt/truncated embedded blob is caught here instead of
         // silently handed to the caller.
-        let image = image::load_from_memory_with_format(png_bytes, image::ImageFormat::Png)
-            .map_err(|e| {
-                anyhow::anyhow!("embedded PNG in {} failed to decode: {e}", path.display())
-            })?;
-
-        let mut out = Vec::new();
-        image
-            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
-            .map_err(|e| anyhow::anyhow!("failed to re-encode PNG for {}: {e}", path.display()))?;
-        return Ok(out);
+        return image::load_from_memory_with_format(png_bytes, image::ImageFormat::Png).map_err(
+            |e| anyhow::anyhow!("embedded PNG in {} failed to decode: {e}", path.display()),
+        );
     }
 
     // No embedded FObjectThumbnail PNG (i.e. this is a real cooked asset, not
@@ -1096,13 +1093,15 @@ pub fn uasset_to_png(path: &Path) -> anyhow::Result<Vec<u8>> {
     // FTexturePlatformData mip chain and decoding its BC/DXT blocks. See
     // decode_compressed_mip0's doc comment for exactly which fixtures this
     // is confirmed to work on.
-    decode_compressed_mip0(path).map_err(|e| {
-        anyhow::anyhow!(
-            "no embedded-PNG texture payload found in {} (tried decoding it as a cooked \
+    decode_compressed_mip0(path)
+        .map(image::DynamicImage::ImageRgba8)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "no embedded-PNG texture payload found in {} (tried decoding it as a cooked \
              DXT/BC-compressed FTexturePlatformData mip chain instead, which also failed): {e}",
-            path.display()
-        )
-    })
+                path.display()
+            )
+        })
 }
 
 #[cfg(test)]
