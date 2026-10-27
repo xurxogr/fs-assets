@@ -7,16 +7,17 @@
 //!
 //! There is deliberately no separate "build a database from scratch" entry
 //! point: creating the very first mod's database and merging in the Nth
-//! mod's are the same operation — [`add_mod_to_database`] reads whatever
-//! already exists at the output path (an empty per-resolution skeleton if
-//! nothing does yet) and merges this mod's templates into it, upserting by
-//! `code`. `crate::cli`'s `add-mod` command is the only caller.
+//! mod's are the same operation — [`add_mod_to_database_with_progress`]
+//! reads whatever already exists at the output path (an empty per-resolution
+//! skeleton if nothing does yet) and merges this mod's templates into it,
+//! upserting by `code`. `crate::cli`'s `add-mod` command is the only caller.
 //!
 //! Mirrors the split in `crate::catalog::pipeline`: the icon-path -> file
-//! resolution is injected as a closure (so [`build_database_from_catalog`] is
-//! testable with an in-memory/fixture map, matching `blueprint_parser`'s
-//! loader-closure pattern) while the actual `.uasset` decode goes straight
-//! through `crate::convert` (consistent with how `catalog::pipeline` calls
+//! resolution is injected as a closure (so
+//! [`build_database_from_catalog_with_progress`] is testable with an
+//! in-memory/fixture map, matching `blueprint_parser`'s loader-closure
+//! pattern) while the actual `.uasset` decode goes straight through
+//! `crate::convert` (consistent with how `catalog::pipeline` calls
 //! `convert::uasset_to_full_json` directly rather than injecting it).
 //!
 //! # Real end-to-end validation against `fs-ocr`
@@ -59,18 +60,6 @@ pub struct DatabaseBuildStats {
     pub items_embedded: usize,
 }
 
-/// Resolves a catalog `icon_path` (e.g. `War/Content/Textures/UI/ItemIcons/T_Rifle`,
-/// already normalized/version-suffix-stripped by
-/// `crate::database::normalize_icon_path`) to a real file on disk under
-/// `extract_dir`, mirroring how `crate::catalog::pipeline` locates blueprint
-/// assets: the object path is relative to the extraction root and the
-/// `.uasset` extension is appended directly (icon paths, unlike blueprint
-/// paths, don't need `find_blueprint_path`'s one-level-recursive fallback
-/// search since they're already fully-qualified object paths).
-pub fn filesystem_icon_loader(extract_dir: &Path) -> impl Fn(&str) -> Option<PathBuf> + '_ {
-    move |icon_path: &str| resolve_icon_file(extract_dir, icon_path)
-}
-
 /// The `.uasset` file backing `icon_path` under `dir`, if there is one. An
 /// `icon_path` that would resolve outside `dir` (it comes from the catalog,
 /// which a mod controls) resolves to nothing.
@@ -82,13 +71,21 @@ fn resolve_icon_file(dir: &Path, icon_path: &str) -> Option<PathBuf> {
     candidate.exists().then_some(candidate)
 }
 
-/// Same as [`filesystem_icon_loader`], but when one of `overlay_paths`
-/// doesn't resolve under `extract_dir` and `vanilla_extract_dir` is given,
-/// falls back to resolving it there instead. A mod's own icon set often
-/// omits the subicon overlays and/or the shared crate-icon texture, so
-/// vanilla's copies of those are borrowed; an item's main icon never is,
-/// since vanilla's own templates already cover any item the mod doesn't
-/// re-skin.
+/// Resolves a catalog `icon_path` (e.g. `War/Content/Textures/UI/ItemIcons/T_Rifle`,
+/// already normalized/version-suffix-stripped by
+/// `crate::database::normalize_icon_path`) to a real file on disk under
+/// `extract_dir`, mirroring how `crate::catalog::pipeline` locates blueprint
+/// assets: the object path is relative to the extraction root and the
+/// `.uasset` extension is appended directly (icon paths, unlike blueprint
+/// paths, don't need `find_blueprint_path`'s one-level-recursive fallback
+/// search since they're already fully-qualified object paths).
+///
+/// When one of `overlay_paths` doesn't resolve under `extract_dir` and
+/// `vanilla_extract_dir` is given, it falls back to resolving it there
+/// instead. A mod's own icon set often omits the subicon overlays and/or the
+/// shared crate-icon texture, so vanilla's copies of those are borrowed; an
+/// item's main icon never is, since vanilla's own templates already cover
+/// any item the mod doesn't re-skin.
 pub fn filesystem_icon_loader_with_fallback<'a>(
     extract_dir: &'a Path,
     vanilla_extract_dir: Option<&'a Path>,
@@ -187,26 +184,10 @@ where
 /// once and cached for the call; each main icon is decoded for its item and
 /// dropped after, since the game's items almost never share one and keeping
 /// them all would hold every decoded texture until the end.
-pub fn build_database_from_catalog<F>(
-    catalog: &[Value],
-    resolve_icon: F,
-    mod_name: &str,
-) -> (BTreeMap<i32, Vec<IconTemplate>>, DatabaseBuildStats)
-where
-    F: Fn(&str) -> Option<PathBuf>,
-{
-    build_database_from_catalog_with_progress(
-        catalog,
-        resolve_icon,
-        mod_name,
-        &database::SUPPORTED_RESOLUTIONS,
-        &|_, _| {},
-    )
-}
-
-/// Same as [`build_database_from_catalog`], building only `target_resolutions`
-/// and reporting `(done, total)` over the catalog entries to `progress`: once
-/// before the first entry and once after each.
+///
+/// Only `target_resolutions` are built, and `(done, total)` over the catalog
+/// entries is reported to `progress`: once before the first entry and once
+/// after each.
 pub fn build_database_from_catalog_with_progress<F>(
     catalog: &[Value],
     resolve_icon: F,
@@ -367,28 +348,10 @@ pub fn replace_mod_templates(
 /// read from `extract_dir`: an item the mod doesn't ship counts as
 /// `icons_missing`, and vanilla's own templates keep covering it. See
 /// [`filesystem_icon_loader_with_fallback`].
-pub fn add_mod_to_database(
-    extract_dir: &Path,
-    catalog: &[Value],
-    mod_name: &str,
-    output_path: &Path,
-    vanilla_extract_dir: Option<&Path>,
-) -> anyhow::Result<DatabaseBuildStats> {
-    add_mod_to_database_with_progress(
-        extract_dir,
-        catalog,
-        mod_name,
-        output_path,
-        vanilla_extract_dir,
-        &database::SUPPORTED_RESOLUTIONS,
-        &|_, _| {},
-    )
-}
-
-/// Same as [`add_mod_to_database`], rebuilding only `target_resolutions`
-/// (the mod's templates at every other resolution are kept) and reporting
-/// template-build progress to `progress` (see
-/// [`build_database_from_catalog_with_progress`]).
+///
+/// Only `target_resolutions` are rebuilt (the mod's templates at every other
+/// resolution are kept), and template-build progress is reported to
+/// `progress` (see [`build_database_from_catalog_with_progress`]).
 pub fn add_mod_to_database_with_progress(
     extract_dir: &Path,
     catalog: &[Value],
@@ -565,6 +528,49 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::HashMap as StdHashMap;
+
+    fn filesystem_icon_loader(extract_dir: &Path) -> impl Fn(&str) -> Option<PathBuf> + '_ {
+        move |icon_path: &str| resolve_icon_file(extract_dir, icon_path)
+    }
+
+    /// [`build_database_from_catalog_with_progress`] at every supported
+    /// resolution, without progress.
+    fn build_database_from_catalog<F>(
+        catalog: &[Value],
+        resolve_icon: F,
+        mod_name: &str,
+    ) -> (BTreeMap<i32, Vec<IconTemplate>>, DatabaseBuildStats)
+    where
+        F: Fn(&str) -> Option<PathBuf>,
+    {
+        build_database_from_catalog_with_progress(
+            catalog,
+            resolve_icon,
+            mod_name,
+            &database::SUPPORTED_RESOLUTIONS,
+            &|_, _| {},
+        )
+    }
+
+    /// [`add_mod_to_database_with_progress`] at every supported resolution,
+    /// without progress.
+    fn add_mod_to_database(
+        extract_dir: &Path,
+        catalog: &[Value],
+        mod_name: &str,
+        output_path: &Path,
+        vanilla_extract_dir: Option<&Path>,
+    ) -> anyhow::Result<DatabaseBuildStats> {
+        add_mod_to_database_with_progress(
+            extract_dir,
+            catalog,
+            mod_name,
+            output_path,
+            vanilla_extract_dir,
+            &database::SUPPORTED_RESOLUTIONS,
+            &|_, _| {},
+        )
+    }
 
     /// A path-keyed in-memory loader standing in for real files on disk,
     /// mirroring `blueprint_parser`'s own `map_loader` test helper pattern.
