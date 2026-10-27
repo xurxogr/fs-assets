@@ -251,17 +251,14 @@ pub fn simplify_value(value: &Value) -> Value {
                 json!(rounded)
             }
         }
-        Value::String(s) => {
-            if !s.is_empty()
-                && (s.starts_with('+') || s.starts_with('-'))
-                && s.len() > 1
-                && s[1..].chars().all(|c| c.is_ascii_digit())
-            {
-                json!(s.parse::<i64>().unwrap())
-            } else {
-                value.clone()
-            }
-        }
+        // A signed integer string becomes a number, unless it doesn't fit an
+        // `i64`, in which case it is kept as the string it was.
+        Value::String(s) => match s.strip_prefix(['+', '-']) {
+            Some(digits) if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) => s
+                .parse::<i64>()
+                .map_or_else(|_| value.clone(), |n| json!(n)),
+            _ => value.clone(),
+        },
         Value::Object(map) => {
             let simplified: Map<String, Value> = map
                 .iter()
@@ -423,6 +420,30 @@ mod tests {
 
     mod simplify_value_tests {
         use super::*;
+
+        #[test]
+        fn converts_signed_integer_strings_to_numbers() {
+            assert_eq!(simplify_value(&json!("+42")), json!(42));
+            assert_eq!(simplify_value(&json!("-7")), json!(-7));
+            assert_eq!(
+                simplify_value(&json!("-9223372036854775808")),
+                json!(i64::MIN)
+            );
+        }
+
+        #[test]
+        fn keeps_signed_integer_strings_that_overflow_i64() {
+            for s in ["+99999999999999999999", "-9223372036854775809"] {
+                assert_eq!(simplify_value(&json!(s)), json!(s));
+            }
+        }
+
+        #[test]
+        fn keeps_strings_that_are_not_signed_integers() {
+            for s in ["+", "-", "42", "+4a", "--1", ""] {
+                assert_eq!(simplify_value(&json!(s)), json!(s));
+            }
+        }
 
         #[test]
         fn converts_whole_float_to_int() {
