@@ -141,6 +141,41 @@ fn write_fstring<W: Write>(w: &mut W, s: &str) -> io::Result<()> {
     }
 }
 
+/// Bound on the text a `.locres` file may resolve to, as a multiple of the
+/// file's size. Entries reference a shared string array, so a small file can
+/// point thousands of keys at one long string and make every entry copy it;
+/// real game files resolve to under 1x their size.
+const MAX_TEXT_PER_FILE_BYTE: u64 = 16;
+
+/// Running total of the text resolved from one `.locres` file, failing once
+/// it passes [`MAX_TEXT_PER_FILE_BYTE`] times the file's size.
+pub(crate) struct TextBudget {
+    remaining: u64,
+}
+
+impl TextBudget {
+    pub(crate) fn new(file_len: u64) -> Self {
+        Self {
+            remaining: file_len.saturating_mul(MAX_TEXT_PER_FILE_BYTE),
+        }
+    }
+
+    pub(crate) fn spend(&mut self, text: &str) -> io::Result<()> {
+        self.remaining = self
+            .remaining
+            .checked_sub(text.len() as u64)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "entries resolve to more than {MAX_TEXT_PER_FILE_BYTE}x the file's size in text"
+                    ),
+                )
+            })?;
+        Ok(())
+    }
+}
+
 /// Parse a version-2 `.locres` file, preserving every namespace, key, hash,
 /// and string exactly.
 pub fn parse(path: &Path) -> Result<LocresDocument> {
@@ -229,34 +264,32 @@ pub fn parse(path: &Path) -> Result<LocresDocument> {
         string_array.push(text);
     }
 
-    let namespaces = pending
-        .into_iter()
-        .map(|ns| {
-            let entries = ns
-                .entries
-                .into_iter()
-                .map(|e| {
-                    let text =
-                        if e.string_index >= 0 && (e.string_index as usize) < string_array.len() {
-                            string_array[e.string_index as usize].clone()
-                        } else {
-                            String::new()
-                        };
-                    LocresEntry {
-                        key_hash: e.key_hash,
-                        key: e.key,
-                        source_hash: e.source_hash,
-                        text,
-                    }
-                })
-                .collect();
-            LocresNamespace {
-                namespace_hash: ns.namespace_hash,
-                namespace: ns.namespace,
-                entries,
-            }
-        })
-        .collect();
+    let mut text_budget = TextBudget::new(file_len);
+    let mut namespaces = Vec::new();
+    for ns in pending {
+        let mut entries = Vec::new();
+        for e in ns.entries {
+            let text = usize::try_from(e.string_index)
+                .ok()
+                .and_then(|index| string_array.get(index))
+                .cloned()
+                .unwrap_or_default();
+            text_budget
+                .spend(&text)
+                .with_context(|| path.display().to_string())?;
+            entries.push(LocresEntry {
+                key_hash: e.key_hash,
+                key: e.key,
+                source_hash: e.source_hash,
+                text,
+            });
+        }
+        namespaces.push(LocresNamespace {
+            namespace_hash: ns.namespace_hash,
+            namespace: ns.namespace,
+            entries,
+        });
+    }
 
     Ok(LocresDocument {
         version,
@@ -322,6 +355,34 @@ pub fn write(doc: &LocresDocument, path: &Path) -> Result<()> {
 
     fs::write(path, buf).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
+}
+
+/// A `.locres` whose `keys` entries all point at one `text_len`-byte string,
+/// so the file is small but resolves to `keys * text_len` bytes of text.
+#[cfg(test)]
+pub(crate) fn shared_text_locres(keys: u32, text_len: usize) -> Vec<u8> {
+    let mut buf = LOCRES_MAGIC.to_vec();
+    buf.push(2);
+    let string_array_offset_pos = buf.len();
+    buf.extend_from_slice(&0i64.to_le_bytes());
+    buf.extend_from_slice(&keys.to_le_bytes()); // entries count
+    buf.extend_from_slice(&1u32.to_le_bytes()); // namespace count
+    buf.extend_from_slice(&0u32.to_le_bytes()); // namespace hash
+    write_fstring(&mut buf, "").unwrap();
+    buf.extend_from_slice(&keys.to_le_bytes()); // key count
+    for i in 0..keys {
+        buf.extend_from_slice(&0u32.to_le_bytes()); // key hash
+        write_fstring(&mut buf, &format!("k{i}")).unwrap();
+        buf.extend_from_slice(&0u32.to_le_bytes()); // source hash
+        buf.extend_from_slice(&0i32.to_le_bytes()); // string index
+    }
+    let string_array_offset = buf.len() as i64;
+    buf.extend_from_slice(&1i32.to_le_bytes());
+    write_fstring(&mut buf, &"x".repeat(text_len)).unwrap();
+    buf.extend_from_slice(&keys.to_le_bytes()); // ref count
+    buf[string_array_offset_pos..string_array_offset_pos + 8]
+        .copy_from_slice(&string_array_offset.to_le_bytes());
+    buf
 }
 
 // ---------------------------------------------------------------------
@@ -641,6 +702,22 @@ mod tests {
                     "{offset}: {err}"
                 );
             }
+        }
+
+        #[test]
+        fn rejects_entries_that_resolve_to_far_more_text_than_the_file() {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("shared.locres");
+
+            fs::write(&path, shared_text_locres(4, 100)).unwrap();
+            assert_eq!(parse(&path).unwrap().namespaces[0].entries.len(), 4);
+
+            fs::write(&path, shared_text_locres(2000, 4096)).unwrap();
+            let err = parse(&path).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("the file's size in text"),
+                "{err:#}"
+            );
         }
 
         #[test]

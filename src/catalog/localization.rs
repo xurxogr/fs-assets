@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::locres::TextBudget;
+
 /// Magic number for modern locres files (UE4 `FTextLocalizationResource`).
 pub const LOCRES_MAGIC: [u8; 16] = [
     0x0e, 0x14, 0x74, 0x75, 0x67, 0x4a, 0x03, 0xfc, 0x4a, 0x15, 0x90, 0x9d, 0xc3, 0x37, 0x7f, 0x1b,
@@ -181,6 +183,7 @@ fn read_namespace_strings<R: Read>(
     r: &mut R,
     version: u8,
     string_array: &[String],
+    text_budget: &mut TextBudget,
 ) -> io::Result<HashMap<String, String>> {
     let mut strings = HashMap::new();
 
@@ -195,11 +198,12 @@ fn read_namespace_strings<R: Read>(
 
             let value = if version >= 1 {
                 let str_index = read_i32(r)?;
-                if str_index >= 0 && (str_index as usize) < string_array.len() {
-                    string_array[str_index as usize].clone()
-                } else {
-                    String::new()
-                }
+                let text = usize::try_from(str_index)
+                    .ok()
+                    .and_then(|index| string_array.get(index))
+                    .map_or("", String::as_str);
+                text_budget.spend(text)?;
+                text.to_string()
             } else {
                 read_fstring(r)?.unwrap_or_default()
             };
@@ -235,7 +239,8 @@ fn parse_locres_inner(filepath: &Path) -> io::Result<HashMap<String, String>> {
         read_u32(&mut f)?; // entries count, unused
     }
 
-    read_namespace_strings(&mut f, version, &string_array)
+    let mut text_budget = TextBudget::new(f.metadata()?.len());
+    read_namespace_strings(&mut f, version, &string_array, &mut text_budget)
 }
 
 /// Parse a UE4 `.locres` file. A parse error (malformed or legacy file,
@@ -782,6 +787,19 @@ mod tests {
                     "{offset}: {err}"
                 );
             }
+        }
+
+        #[test]
+        fn rejects_entries_that_resolve_to_far_more_text_than_the_file() {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("shared.locres");
+
+            fs::write(&path, crate::locres::shared_text_locres(4, 100)).unwrap();
+            assert_eq!(parse_locres_inner(&path).unwrap().len(), 4);
+
+            fs::write(&path, crate::locres::shared_text_locres(2000, 4096)).unwrap();
+            let err = parse_locres_inner(&path).unwrap_err();
+            assert!(err.to_string().contains("the file's size in text"), "{err}");
         }
     }
 
