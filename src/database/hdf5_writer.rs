@@ -179,6 +179,27 @@ fn read_group(group: &hdf5::Group, resolution: i32) -> anyhow::Result<Vec<IconTe
     let category: Vec<u8> = group.dataset("category")?.read_raw()?;
     let phash: Vec<u64> = group.dataset("phash")?.read_raw()?;
 
+    // `template_count` is only an attribute of the file: check it against
+    // what the datasets really hold before indexing them with it.
+    let lengths = [
+        ("images", images.len() / image_len),
+        ("codes", codes.len()),
+        ("mods", mods.len()),
+        ("crated", crated.len()),
+        ("faction", faction.len()),
+        ("category", category.len()),
+        ("phash", phash.len()),
+    ];
+    if !images.len().is_multiple_of(image_len) {
+        anyhow::bail!(
+            "group {resolution}: images holds {} bytes, not a whole number of {image_len}-byte icons",
+            images.len()
+        );
+    }
+    if let Some((name, len)) = lengths.iter().find(|(_, len)| *len != n) {
+        anyhow::bail!("group {resolution}: template_count is {n} but {name} holds {len} entries");
+    }
+
     let mut templates = Vec::with_capacity(n);
     for i in 0..n {
         templates.push(IconTemplate {
@@ -344,6 +365,25 @@ mod tests {
         );
         resolutions.insert(1440, vec![sample_from("Rifle", "vanilla", 1440)]);
         write_database(&resolutions, output).unwrap();
+    }
+
+    #[test]
+    fn rejects_a_template_count_the_datasets_do_not_hold() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("db.h5");
+        write_two_mod_database(&path);
+        {
+            let file = hdf5::File::open_rw(&path).unwrap();
+            let group = file.group("1080").unwrap();
+            group
+                .attr("template_count")
+                .unwrap()
+                .write_scalar(&i64::MAX)
+                .unwrap();
+        }
+
+        let err = read_database(&path).unwrap_err();
+        assert!(err.to_string().contains("template_count"), "{err}");
     }
 
     #[test]
