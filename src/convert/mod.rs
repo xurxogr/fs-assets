@@ -1066,7 +1066,8 @@ fn decode_blocks_into(
 /// of the 3 fixtures) — each candidate is validated by checking its
 /// preceding `[W, H, Len]` header is internally consistent (`Len > 0`,
 /// `sig + Len` in bounds, and the PNG actually ends with `IEND` at that
-/// exact position) before it's accepted.
+/// exact position) and by decoding it, the next candidate being tried when
+/// it fails.
 pub fn uasset_to_png(path: &Path) -> anyhow::Result<Vec<u8>> {
     let image = uasset_to_image(path)?;
     let mut out = Vec::new();
@@ -1087,6 +1088,7 @@ pub fn uasset_to_image(path: &Path) -> anyhow::Result<image::DynamicImage> {
     // function's error path ever needs a stricter validation step.
     let file_bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
 
+    let mut png_error = None;
     for sig_offset in find_png_magic_offsets(&file_bytes) {
         if sig_offset < 12 {
             continue;
@@ -1111,10 +1113,14 @@ pub fn uasset_to_image(path: &Path) -> anyhow::Result<image::DynamicImage> {
 
         // Decoded (rather than the embedded bytes passed through untouched)
         // so a corrupt/truncated embedded blob is caught here instead of
-        // silently handed to the caller.
-        return decode_png(std::io::Cursor::new(png_bytes)).map_err(|e| {
-            anyhow::anyhow!("embedded PNG in {} failed to decode: {e}", path.display())
-        });
+        // silently handed to the caller. A candidate that passed the header
+        // checks by chance fails here, so the next one is still tried.
+        match decode_png(std::io::Cursor::new(png_bytes)) {
+            Ok(image) => return Ok(image),
+            Err(e) => {
+                png_error.get_or_insert(e);
+            }
+        }
     }
 
     // No embedded FObjectThumbnail PNG (i.e. this is a real cooked asset, not
@@ -1124,12 +1130,17 @@ pub fn uasset_to_image(path: &Path) -> anyhow::Result<image::DynamicImage> {
     // is confirmed to work on.
     decode_compressed_mip0(path, &file_bytes)
         .map(image::DynamicImage::ImageRgba8)
-        .map_err(|e| {
-            anyhow::anyhow!(
+        .map_err(|e| match png_error {
+            Some(png_error) => anyhow::anyhow!(
+                "embedded PNG in {} failed to decode: {png_error} (decoding it as a cooked \
+                 DXT/BC-compressed FTexturePlatformData mip chain instead also failed: {e})",
+                path.display()
+            ),
+            None => anyhow::anyhow!(
                 "no embedded-PNG texture payload found in {} (tried decoding it as a cooked \
              DXT/BC-compressed FTexturePlatformData mip chain instead, which also failed): {e}",
                 path.display()
-            )
+            ),
         })
 }
 
@@ -1256,6 +1267,46 @@ mod tests {
                 assert_eq!(actual, expected, "{format:?} {width}x{height}");
             }
         }
+    }
+
+    /// An embedded-PNG candidate as `uasset_to_image` looks for it: the
+    /// `[W, H, Len]` header, then `png` itself.
+    fn embedded_png_candidate(png: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![0u8; 8];
+        bytes.extend_from_slice(&(png.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(png);
+        bytes
+    }
+
+    #[test]
+    fn uasset_to_image_skips_an_embedded_png_candidate_that_fails_to_decode() {
+        let mut corrupt = png_bytes(2, 2);
+        corrupt[16..20].copy_from_slice(&0u32.to_be_bytes()); // IHDR width 0
+        let mut file = b"junk".to_vec();
+        file.extend(embedded_png_candidate(&corrupt));
+        file.extend(embedded_png_candidate(&png_bytes(3, 5)));
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("Icon.uasset");
+        std::fs::write(&path, file).unwrap();
+
+        let image = uasset_to_image(&path).unwrap();
+
+        assert_eq!((image.width(), image.height()), (3, 5));
+    }
+
+    #[test]
+    fn uasset_to_image_reports_an_embedded_png_that_fails_to_decode() {
+        let mut corrupt = png_bytes(2, 2);
+        corrupt[16..20].copy_from_slice(&0u32.to_be_bytes());
+        let mut file = b"junk".to_vec();
+        file.extend(embedded_png_candidate(&corrupt));
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("Icon.uasset");
+        std::fs::write(&path, file).unwrap();
+
+        let error = uasset_to_image(&path).unwrap_err().to_string();
+
+        assert!(error.starts_with("embedded PNG in "), "{error}");
     }
 
     #[test]
