@@ -940,38 +940,15 @@ fn decode_compressed_mip0(path: &Path, bytes: &[u8]) -> anyhow::Result<image::Rg
             rgba.extend_from_slice(&[r, g, b, a]);
         }
     } else {
-        let mut pixels = vec![0u32; width * height];
-        let decode_result = match header.pixel_format {
-            CompressedPixelFormat::Dxt1 => {
-                texture2ddecoder::decode_bc1(payload, width, height, &mut pixels)
-            }
-            CompressedPixelFormat::Dxt5 => {
-                texture2ddecoder::decode_bc3(payload, width, height, &mut pixels)
-            }
-            CompressedPixelFormat::Bc5 => {
-                texture2ddecoder::decode_bc5(payload, width, height, &mut pixels)
-            }
-            CompressedPixelFormat::Bc7 => {
-                texture2ddecoder::decode_bc7(payload, width, height, &mut pixels)
-            }
-            CompressedPixelFormat::B8g8r8a8 => unreachable!(),
-        };
-        decode_result.map_err(|e| {
-            anyhow::anyhow!(
-                "{}: texture2ddecoder failed to decode {:?} block data: {e}",
-                path.display(),
-                header.pixel_format
-            )
-        })?;
-
-        // texture2ddecoder packs each output pixel via `color(r,g,b,a) =
-        // u32::from_le_bytes([b,g,r,a])`, i.e. as a little-endian BGRA u32 --
-        // confirmed by reading its `src/color.rs` source directly rather
-        // than assuming a channel order. Un-swizzle to RGBA for `image`.
-        for px in &pixels {
-            let [b, g, r, a] = px.to_le_bytes();
-            rgba.extend_from_slice(&[r, g, b, a]);
-        }
+        decode_blocks_into(header.pixel_format, payload, width, height, &mut rgba).map_err(
+            |e| {
+                anyhow::anyhow!(
+                    "{}: texture2ddecoder failed to decode {:?} block data: {e}",
+                    path.display(),
+                    header.pixel_format
+                )
+            },
+        )?;
     }
 
     image::RgbaImage::from_raw(width as u32, height as u32, rgba).ok_or_else(|| {
@@ -982,6 +959,54 @@ fn decode_compressed_mip0(path: &Path, bytes: &[u8]) -> anyhow::Result<image::Rg
             height
         )
     })
+}
+
+/// Decodes `payload`, a `width`x`height` mip of block-compressed `format`
+/// data (exactly `expected_block_payload_len` bytes), appending its pixels to
+/// `rgba` as RGBA8.
+///
+/// Decoded one row of 4x4 blocks at a time into a small strip that is
+/// appended to `rgba`, so the only full-size buffer is `rgba` itself:
+/// decoding the whole mip into `u32` pixels first would double the peak
+/// memory a large hostile texture can claim.
+fn decode_blocks_into(
+    format: CompressedPixelFormat,
+    payload: &[u8],
+    width: usize,
+    height: usize,
+    rgba: &mut Vec<u8>,
+) -> Result<(), &'static str> {
+    let strip_payload_len = width.div_ceil(4) * format.block_bytes();
+    let mut strip = vec![0u32; width * 4];
+    for (block_row, strip_payload) in payload.chunks(strip_payload_len).enumerate() {
+        let rows = (height - block_row * 4).min(4);
+        let strip = &mut strip[..width * rows];
+        match format {
+            CompressedPixelFormat::Dxt1 => {
+                texture2ddecoder::decode_bc1(strip_payload, width, rows, strip)
+            }
+            CompressedPixelFormat::Dxt5 => {
+                texture2ddecoder::decode_bc3(strip_payload, width, rows, strip)
+            }
+            CompressedPixelFormat::Bc5 => {
+                texture2ddecoder::decode_bc5(strip_payload, width, rows, strip)
+            }
+            CompressedPixelFormat::Bc7 => {
+                texture2ddecoder::decode_bc7(strip_payload, width, rows, strip)
+            }
+            CompressedPixelFormat::B8g8r8a8 => unreachable!("not block-compressed"),
+        }?;
+
+        // texture2ddecoder packs each output pixel via `color(r,g,b,a) =
+        // u32::from_le_bytes([b,g,r,a])`, i.e. as a little-endian BGRA u32 --
+        // confirmed by reading its `src/color.rs` source directly rather
+        // than assuming a channel order. Un-swizzle to RGBA for `image`.
+        for px in strip.iter() {
+            let [b, g, r, a] = px.to_le_bytes();
+            rgba.extend_from_slice(&[r, g, b, a]);
+        }
+    }
+    Ok(())
 }
 
 /// Texture -> PNG export.
@@ -1181,6 +1206,49 @@ mod tests {
             .write_to(&mut bytes, image::ImageFormat::Png)
             .unwrap();
         bytes.into_inner()
+    }
+
+    /// Decoding a mip one block row at a time gives exactly what decoding
+    /// it whole does, for every block format and for sizes that aren't a
+    /// multiple of the 4x4 block.
+    #[test]
+    fn strip_decoding_matches_whole_image_decoding() {
+        let mut seed = 0x2545_f491_u32;
+        let mut noise = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as u8
+        };
+        type Decoder = fn(&[u8], usize, usize, &mut [u32]) -> Result<(), &'static str>;
+        let formats: [(CompressedPixelFormat, Decoder); 4] = [
+            (CompressedPixelFormat::Dxt1, texture2ddecoder::decode_bc1),
+            (CompressedPixelFormat::Dxt5, texture2ddecoder::decode_bc3),
+            (CompressedPixelFormat::Bc5, texture2ddecoder::decode_bc5),
+            (CompressedPixelFormat::Bc7, texture2ddecoder::decode_bc7),
+        ];
+        for (format, decode_whole) in formats {
+            for (width, height) in [(1, 1), (4, 4), (10, 7), (13, 9), (64, 33)] {
+                let len = expected_block_payload_len(format, width as i32, height as i32);
+                let payload: Vec<u8> = (0..len).map(|_| noise()).collect();
+
+                let mut whole = vec![0u32; width * height];
+                let expected = decode_whole(&payload, width, height, &mut whole).map(|()| {
+                    whole
+                        .iter()
+                        .flat_map(|px| {
+                            let [b, g, r, a] = px.to_le_bytes();
+                            [r, g, b, a]
+                        })
+                        .collect::<Vec<u8>>()
+                });
+                let mut rgba = Vec::new();
+                let actual =
+                    decode_blocks_into(format, &payload, width, height, &mut rgba).map(|()| rgba);
+
+                assert_eq!(actual, expected, "{format:?} {width}x{height}");
+            }
+        }
     }
 
     #[test]
