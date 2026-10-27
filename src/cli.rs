@@ -1,6 +1,8 @@
 use std::ffi::OsString;
+use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -326,9 +328,54 @@ pub fn error_message(error: &anyhow::Error) -> String {
 }
 
 /// Runs the command line `args` (program name first) and returns the process
-/// exit code: 0 on success, 1 when the command fails, and clap's own code
-/// for `--help`, `--version` and bad arguments. Never exits the process
+/// exit code: 0 on success, 1 when the command fails,
+/// [`INTERRUPTED_EXIT_CODE`] when Ctrl-C stopped it, and clap's own code for
+/// `--help`, `--version` and bad arguments. Never exits the process
 /// itself, so the Python bindings can call it inside the interpreter.
+/// Set when Ctrl-C asks the running command to stop. The long commands check
+/// it at every progress report and stop there with [`Interrupted`], which
+/// unwinds normally so their temporary files are removed.
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the running command checks [`INTERRUPTED`]; the short ones don't.
+static INTERRUPTIBLE: AtomicBool = AtomicBool::new(false);
+
+/// What the binary's Ctrl-C handler calls (see `main.rs`). Asks the running
+/// command to stop at its next progress report and returns `false`, or
+/// returns `true` when the process should exit at once instead: on a second
+/// Ctrl-C, or while running a command that never reports progress.
+pub fn request_interrupt() -> bool {
+    !INTERRUPTIBLE.load(Ordering::Relaxed) || INTERRUPTED.swap(true, Ordering::Relaxed)
+}
+
+/// The error a command stops with once [`INTERRUPTED`] is set.
+#[derive(Debug)]
+pub struct Interrupted;
+
+impl fmt::Display for Interrupted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("interrupted")
+    }
+}
+
+impl std::error::Error for Interrupted {}
+
+/// Exit code of a command stopped by Ctrl-C, as shells report SIGINT.
+pub const INTERRUPTED_EXIT_CODE: i32 = 130;
+
+/// Fails with [`Interrupted`] once Ctrl-C was pressed.
+fn check_interrupted() -> anyhow::Result<()> {
+    if INTERRUPTED.load(Ordering::Relaxed) {
+        return Err(Interrupted.into());
+    }
+    Ok(())
+}
+
+/// Progress callback of the commands that don't print their progress.
+fn interruptible(_done: usize, _total: usize) -> anyhow::Result<()> {
+    check_interrupted()
+}
+
 pub fn run<I, T>(args: I) -> i32
 where
     I: IntoIterator<Item = T>,
@@ -342,8 +389,29 @@ where
             return e.exit_code();
         }
     };
-    match run_command(cli.command) {
+    INTERRUPTIBLE.store(
+        matches!(
+            cli.command,
+            Commands::Unpak { .. }
+                | Commands::BuildCatalog { .. }
+                | Commands::AddMod { .. }
+                | Commands::ExtractIcons { .. }
+                | Commands::Pack { .. }
+                | Commands::GrepStrings { .. }
+        ),
+        Ordering::Relaxed,
+    );
+    exit_code(run_command(cli.command))
+}
+
+/// The exit code of a command that ended with `result`, reporting its error.
+fn exit_code(result: anyhow::Result<()>) -> i32 {
+    match result {
         Ok(()) => 0,
+        Err(e) if e.is::<Interrupted>() => {
+            eprintln!("Interrupted");
+            INTERRUPTED_EXIT_CODE
+        }
         Err(e) => {
             eprintln!("Error: {}", error_message(&e));
             1
@@ -358,7 +426,8 @@ fn run_command(command: Commands) -> anyhow::Result<()> {
             include,
             output,
         } => {
-            let extracted = pak::extract(&pak, include.as_deref(), &output)?;
+            let extracted =
+                pak::extract_with_progress(&pak, include.as_deref(), &output, &interruptible)?;
             for path in &extracted {
                 println!("{path}");
             }
@@ -385,8 +454,15 @@ fn run_command(command: Commands) -> anyhow::Result<()> {
             full,
         } => {
             let (entries, stats) = match (extract_dir, pak) {
-                (Some(dir), _) => catalog::pipeline::build_catalog_from_extract_dir(&dir)?,
-                (None, Some(pak)) => catalog::pipeline::build_catalog_from_pak(&pak)?,
+                (Some(dir), _) => catalog::pipeline::build_catalog_from_extract_dir_with_progress(
+                    &dir,
+                    &interruptible,
+                )?,
+                (None, Some(pak)) => catalog::pipeline::build_catalog_from_pak_with_progress(
+                    &pak,
+                    &interruptible,
+                    &interruptible,
+                )?,
                 (None, None) => anyhow::bail!("either --extract-dir or --pak is required"),
             };
             let entries = if full {
@@ -422,7 +498,7 @@ fn run_command(command: Commands) -> anyhow::Result<()> {
             };
             let stats = add_mod::add_mod(&request, &|update| {
                 print_progress(update);
-                Ok(())
+                check_interrupted()
             })?;
 
             println!(
@@ -465,7 +541,7 @@ fn run_command(command: Commands) -> anyhow::Result<()> {
             };
             let stats = add_mod::extract_icons(&request, &|update| {
                 print_progress(update);
-                Ok(())
+                check_interrupted()
             })?;
             println!(
                 "written {} icons_missing {} decode_errors {} subicons_missing {}",
@@ -514,7 +590,13 @@ fn run_command(command: Commands) -> anyhow::Result<()> {
             mount_point,
             version,
         } => {
-            let written = pak::pack(&input, &output, &mount_point, version.into())?;
+            let written = pak::pack_with_progress(
+                &input,
+                &output,
+                &mount_point,
+                version.into(),
+                &interruptible,
+            )?;
             for path in &written {
                 println!("{path}");
             }
@@ -543,7 +625,8 @@ fn run_command(command: Commands) -> anyhow::Result<()> {
             pattern,
             content_dir,
         } => {
-            let matches = grep::search_content_dir(&content_dir, &pattern)?;
+            let matches =
+                grep::search_content_dir_with_progress(&content_dir, &pattern, &interruptible)?;
             for m in &matches {
                 println!("{} [{}]", m.path.display(), m.encoding);
             }
@@ -596,6 +679,15 @@ mod tests {
     fn run_returns_clap_exit_codes_instead_of_exiting() {
         assert_eq!(run(["fs-assets", "--help"]), 0);
         assert_eq!(run(["fs-assets", "no-such-command"]), 2);
+    }
+
+    #[test]
+    fn an_interrupted_command_exits_with_130() {
+        let interrupted: anyhow::Result<()> = Err(anyhow::Error::from(Interrupted));
+        assert_eq!(exit_code(interrupted), INTERRUPTED_EXIT_CODE);
+        let wrapped = Err(anyhow::Error::from(Interrupted).context("while extracting"));
+        assert_eq!(exit_code(wrapped), INTERRUPTED_EXIT_CODE);
+        assert_eq!(exit_code(Err(anyhow::anyhow!("boom"))), 1);
     }
 
     #[test]
