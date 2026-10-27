@@ -464,11 +464,19 @@ fn find_file_recursive(dir: &Path, filename: &OsStr) -> Option<PathBuf> {
 /// don't exist, or for files that fail to parse.
 pub fn filesystem_loader(blueprints_dir: &Path) -> impl Fn(&str) -> Option<Value> + '_ {
     move |object_path: &str| {
-        let relative = object_path.strip_prefix("/Game/Blueprints/")?;
-        let candidate = blueprints_dir.join(format!("{relative}.uasset"));
+        let candidate = blueprint_candidate(blueprints_dir, object_path)?;
         let resolved = find_blueprint_path(blueprints_dir, &candidate)?;
         crate::convert::uasset_to_full_json(&resolved).ok()
     }
+}
+
+/// `<blueprints_dir>/<relative>.uasset` for a `/Game/Blueprints/<relative>`
+/// object path. The object path comes from an asset's imports, so it is kept
+/// inside `blueprints_dir` like any other untrusted path: `None` for one that
+/// would climb out with `..` or an absolute path.
+fn blueprint_candidate(blueprints_dir: &Path, object_path: &str) -> Option<PathBuf> {
+    let relative = object_path.strip_prefix("/Game/Blueprints/")?;
+    crate::pak::contained_path(blueprints_dir, &format!("{relative}.uasset")).ok()
 }
 
 #[cfg(test)]
@@ -949,6 +957,34 @@ mod tests {
             std::fs::create_dir_all(&blueprints_dir).unwrap();
             let requested = blueprints_dir.join("Missing/BPGone.uasset");
             assert_eq!(find_blueprint_path(&blueprints_dir, &requested), None);
+        }
+
+        #[test]
+        fn blueprint_candidate_maps_object_path_into_blueprints_dir() {
+            let blueprints_dir = Path::new("/x/Blueprints");
+            assert_eq!(
+                blueprint_candidate(blueprints_dir, "/Game/Blueprints/Items/BPFoo"),
+                Some(blueprints_dir.join("Items/BPFoo.uasset"))
+            );
+            assert_eq!(blueprint_candidate(blueprints_dir, "/Game/Other/BPFoo"), None);
+        }
+
+        #[test]
+        fn blueprint_candidate_refuses_paths_that_escape() {
+            let blueprints_dir = Path::new("/x/Blueprints");
+            for object_path in [
+                "/Game/Blueprints/../../etc/passwd",
+                "/Game/Blueprints/Items/..\\..\\secret",
+                "/Game/Blueprints/C:/Windows/x",
+            ] {
+                assert_eq!(blueprint_candidate(blueprints_dir, object_path), None);
+            }
+            // A doubled prefix keeps the absolute-looking rest inside the dir
+            // instead of letting `join` replace it.
+            assert_eq!(
+                blueprint_candidate(blueprints_dir, "/Game/Blueprints//Game/Foo/X"),
+                Some(blueprints_dir.join("Game/Foo/X.uasset"))
+            );
         }
 
         fn tempfile_dir() -> PathBuf {
