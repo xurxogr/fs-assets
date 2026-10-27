@@ -8,6 +8,7 @@ present locally, since those fixtures aren't checked into the repo.
 import importlib
 import importlib.metadata
 import json
+import logging
 import signal
 import struct
 import zlib
@@ -485,3 +486,16 @@ def test_extract_icons_counts_undecodable_icons(tmp_path):
         "decode_errors": 1,
         "subicons_missing": 0,
     }
+
+
+def test_library_warnings_go_to_python_logging(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING, logger="fs_assets"):
+        fs_assets.extract_icons(
+            pak=str(_icon_mod_pak(tmp_path)),
+            catalog=str(_catalog(tmp_path)),
+            output=str(tmp_path / "icons"),
+            subicons=False,
+        )
+
+    assert [(r.name, r.levelno) for r in caplog.records] == [("fs_assets", logging.WARNING)]
+    assert caplog.records[0].getMessage().startswith("extract-icons: ")

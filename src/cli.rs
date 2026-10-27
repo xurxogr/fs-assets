@@ -256,6 +256,21 @@ pub fn error_message(error: &anyhow::Error) -> String {
     message
 }
 
+/// Prints the library's warnings to stderr as they come.
+struct StderrLogger;
+
+impl log::Log for StderrLogger {
+    fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        eprintln!("{}", record.args());
+    }
+
+    fn flush(&self) {}
+}
+
 /// Runs the command line `args` (program name first) and returns the process
 /// exit code: 0 on success, 1 when the command fails,
 /// [`INTERRUPTED_EXIT_CODE`] when Ctrl-C stopped it, and clap's own code for
@@ -310,6 +325,11 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
+    // Fails when a logger is already installed, e.g. the Python module's when
+    // run through `cli_main`, which then keeps receiving the warnings.
+    if log::set_logger(&StderrLogger).is_ok() {
+        log::set_max_level(log::LevelFilter::Warn);
+    }
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(e) => {

@@ -54,6 +54,34 @@ fn parse_choice<T: clap::ValueEnum>(what: &str, value: &str) -> PyResult<T> {
     })
 }
 
+/// Hands the library's warnings to Python's `logging`, under the `fs_assets`
+/// logger, so callers can filter, capture or silence them.
+struct PythonLogger;
+
+impl log::Log for PythonLogger {
+    fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        let level = match record.level() {
+            log::Level::Error => 40,
+            log::Level::Warn => 30,
+            log::Level::Info => 20,
+            log::Level::Debug => 10,
+            log::Level::Trace => 5,
+        };
+        Python::attach(|py| {
+            // A failing handler mustn't fail the run that is warning.
+            let _ = PyModule::import(py, "logging")
+                .and_then(|logging| logging.call_method1("getLogger", ("fs_assets",)))
+                .and_then(|logger| logger.call_method1("log", (level, record.args().to_string())));
+        });
+    }
+
+    fn flush(&self) {}
+}
+
 /// An optional Python `(stage, done, total)` progress callable, called from
 /// Rust code that runs with the GIL released. Each report also runs pending
 /// signal handlers, so Ctrl-C raises `KeyboardInterrupt` even without a
@@ -771,5 +799,9 @@ fn _fs_assets(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(grep_strings, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(cli_main, m)?)?;
+    // Fails when the embedding process already installed a logger.
+    if log::set_logger(&PythonLogger).is_ok() {
+        log::set_max_level(log::LevelFilter::Warn);
+    }
     Ok(())
 }

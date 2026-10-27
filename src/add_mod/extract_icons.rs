@@ -146,7 +146,7 @@ where
         let icon = match decode_icon(&path) {
             Ok(icon) => icon,
             Err(e) => {
-                eprintln!("extract-icons: {e}");
+                log::warn!("extract-icons: {e}");
                 stats.decode_errors += 1;
                 continue;
             }
@@ -193,7 +193,7 @@ fn is_plain_file_name(name: &str) -> bool {
 /// error: the item is still written, just without it.
 fn load_subicon(resolve: &impl Fn(&str) -> Option<PathBuf>, path: &str) -> Option<DynamicImage> {
     decode_icon(&resolve(path)?)
-        .map_err(|e| eprintln!("extract-icons: {e}"))
+        .map_err(|e| log::warn!("extract-icons: {e}"))
         .ok()
 }
 

@@ -76,6 +76,10 @@ tempfile = "3"
 # Ctrl-C handler of the `fs-assets` binary, so an interrupted command stops at
 # its next progress report and removes its temporary files.
 ctrlc = "3"
+# Warnings about inputs a run skips (an asset that fails to parse, an icon
+# that fails to decode): the binary prints them to stderr, the Python module
+# hands them to its `logging`.
+log = "0.4"
 # Python bindings (optional), mirroring fs-sav/fs-ocr's `python` feature.
 pyo3 = { version = "0.30.1", features = ["extension-module", "abi3-py310"], optional = true }
 

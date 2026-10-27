@@ -45,7 +45,7 @@ fn resolve_dir(path: &Path) -> PathBuf {
 /// The key -> text strings of a `.locres` file, every namespace flattened
 /// into one map (keys are GUIDs, unique across namespaces), read with
 /// [`crate::locres::parse`]. A file that fails to parse (malformed, legacy
-/// or truncated) is reported on stderr and yields an empty map, so one bad
+/// or truncated) is logged as a warning and yields an empty map, so one bad
 /// locale file never aborts a catalog build but doesn't go unnoticed either.
 fn parse_locres(filepath: &Path) -> HashMap<String, String> {
     match crate::locres::parse(filepath) {
@@ -57,7 +57,7 @@ fn parse_locres(filepath: &Path) -> HashMap<String, String> {
             .map(|entry| (entry.key, entry.text))
             .collect(),
         Err(e) => {
-            eprintln!(
+            log::warn!(
                 "build-catalog: failed to parse {}: {e:#}",
                 filepath.display()
             );
@@ -69,7 +69,7 @@ fn parse_locres(filepath: &Path) -> HashMap<String, String> {
 /// The paths of `dir`'s entries, reporting (and skipping) the directory or
 /// any entry that can't be read.
 fn read_dir_or_warn(dir: &Path) -> Vec<PathBuf> {
-    let warn = |e: io::Error| eprintln!("build-catalog: failed to read {}: {e}", dir.display());
+    let warn = |e: io::Error| log::warn!("build-catalog: failed to read {}: {e}", dir.display());
     match fs::read_dir(dir) {
         Ok(entries) => entries
             .filter_map(|entry| entry.map_err(warn).ok())

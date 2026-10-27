@@ -13,7 +13,7 @@ use serde_json::{json, Map, Value};
 pub(crate) fn load_full_json(root: &Path, path: &Path) -> Option<Value> {
     let path = crate::pak::real_file_under(root, path.to_path_buf())?;
     crate::convert::uasset_to_full_json(&path)
-        .map_err(|e| eprintln!("build-catalog: failed to parse {}: {e}", path.display()))
+        .map_err(|e| log::warn!("build-catalog: failed to parse {}: {e}", path.display()))
         .ok()
 }
 

@@ -169,7 +169,7 @@ where
     let decoded = resolve_icon(path).and_then(|resolved| match decode_icon(&resolved) {
         Ok(img) => Some(Rc::new(img)),
         Err(e) => {
-            eprintln!("add-mod: {e}");
+            log::warn!("add-mod: {e}");
             None
         }
     });
@@ -235,7 +235,7 @@ where
         let image = match decode_icon(&path) {
             Ok(img) => img,
             Err(e) => {
-                eprintln!("add-mod: {e}");
+                log::warn!("add-mod: {e}");
                 stats.decode_errors += 1;
                 continue;
             }

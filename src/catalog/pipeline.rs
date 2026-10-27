@@ -90,7 +90,7 @@ fn cached_loader(raw: impl Fn(&str) -> Option<Value>) -> impl Fn(&str) -> Option
         }
         let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| raw(object_path)))
             .unwrap_or_else(|_| {
-                eprintln!("build-catalog: panicked while parsing {object_path}");
+                log::warn!("build-catalog: panicked while parsing {object_path}");
                 None
             });
         cache
@@ -252,7 +252,7 @@ pub fn build_catalog_from_extract_dir_with_progress(
         ),
     ] {
         if table.is_none() {
-            eprintln!("build-catalog: data table not found, skipping: {name}");
+            log::warn!("build-catalog: data table not found, skipping: {name}");
         }
     }
 
@@ -322,12 +322,12 @@ pub fn build_catalog_from_extract_dir_with_progress(
         })) {
             Ok(Ok(asset)) => asset,
             Ok(Err(e)) => {
-                eprintln!("build-catalog: failed to parse {}: {e}", file.display());
+                log::warn!("build-catalog: failed to parse {}: {e}", file.display());
                 stats.errors += 1;
                 continue;
             }
             Err(_) => {
-                eprintln!("build-catalog: panicked while parsing {}", file.display());
+                log::warn!("build-catalog: panicked while parsing {}", file.display());
                 stats.errors += 1;
                 continue;
             }
@@ -342,7 +342,7 @@ pub fn build_catalog_from_extract_dir_with_progress(
         let entry = match assembled {
             Ok(entry) => entry,
             Err(_) => {
-                eprintln!("build-catalog: panicked while assembling {object_path}");
+                log::warn!("build-catalog: panicked while assembling {object_path}");
                 stats.errors += 1;
                 continue;
             }
