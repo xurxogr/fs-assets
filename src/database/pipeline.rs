@@ -383,6 +383,25 @@ pub fn add_mod_to_database_with_progress(
         target_resolutions,
         progress,
     )?;
+    // Replacing the mod's templates with nothing would silently wipe it: a
+    // wrong `extract_dir` or a pak whose icons all fail to decode builds no
+    // templates at all.
+    if stats.items_embedded == 0
+        && target_resolutions.iter().any(|r| {
+            existing
+                .get(r)
+                .is_some_and(|t| t.iter().any(|t| t.mod_name == mod_name))
+        })
+    {
+        anyhow::bail!(
+            "no icon of {} catalog items could be read (missing {}, decode errors {}); \
+             refusing to replace {mod_name}'s existing templates with none, {} left unchanged",
+            stats.total_items,
+            stats.icons_missing,
+            stats.decode_errors,
+            output_path.display()
+        );
+    }
     let merged = replace_mod_templates(existing, new_templates, mod_name);
     hdf5_writer::write_database(&merged, output_path)?;
     Ok(stats)
@@ -999,8 +1018,10 @@ mod tests {
             }
         }
 
+        /// A run that reads no icon (wrong extraction dir, every icon failing
+        /// to decode) must not wipe the mod's existing templates.
         #[test]
-        fn rebuilding_some_resolutions_keeps_the_others() {
+        fn building_nothing_leaves_the_mods_templates_untouched() {
             let tmp = tempfile::tempdir().unwrap();
             let output = tmp.path().join("out.h5");
             let mut existing: BTreeMap<i32, Vec<IconTemplate>> = database::SUPPORTED_RESOLUTIONS
@@ -1008,24 +1029,45 @@ mod tests {
                 .map(|r| (*r, Vec::new()))
                 .collect();
             existing.insert(1080, vec![stored("Rifle", 1080)]);
-            existing.insert(1440, vec![stored("Rifle", 1440)]);
             hdf5_writer::write_database(&existing, &output).unwrap();
 
-            add_mod_to_database_with_progress(
+            let catalog = vec![json!({
+                "CodeName": "Rifle",
+                "Icon": "War/Content/Textures/DoesNotExist.0",
+            })];
+            let err = add_mod_to_database_with_progress(
                 tmp.path(),
-                &[],
+                &catalog,
                 "vanilla",
                 &output,
                 None,
                 &[1080],
                 &|_, _| Ok(()),
             )
-            .unwrap();
+            .unwrap_err();
+            assert!(err.to_string().contains("left unchanged"), "{err}");
 
             let written = hdf5_writer::read_database(&output).unwrap();
-            assert!(written[&1080].is_empty());
-            assert_eq!(written[&1440].len(), 1);
-            assert_eq!(written.len(), database::SUPPORTED_RESOLUTIONS.len());
+            assert_eq!(written[&1080].len(), 1);
+        }
+
+        /// Building nothing for a mod the database doesn't hold yet loses
+        /// nothing, so it isn't an error.
+        #[test]
+        fn building_nothing_for_a_new_mod_is_allowed() {
+            let tmp = tempfile::tempdir().unwrap();
+            let output = tmp.path().join("out.h5");
+            let mut existing: BTreeMap<i32, Vec<IconTemplate>> = database::SUPPORTED_RESOLUTIONS
+                .iter()
+                .map(|r| (*r, Vec::new()))
+                .collect();
+            existing.insert(1080, vec![stored("Rifle", 1080)]);
+            hdf5_writer::write_database(&existing, &output).unwrap();
+
+            add_mod_to_database(tmp.path(), &[], "cool_mod", &output, None).unwrap();
+
+            let written = hdf5_writer::read_database(&output).unwrap();
+            assert_eq!(written[&1080].len(), 1);
         }
 
         #[test]
