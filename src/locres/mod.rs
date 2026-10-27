@@ -73,6 +73,21 @@ fn read_i64<R: Read>(r: &mut R) -> io::Result<i64> {
     Ok(i64::from_le_bytes(b))
 }
 
+/// Read exactly `len` bytes, growing the buffer as data actually arrives
+/// instead of reserving `len` up front: `len` comes from the file, so a
+/// hostile length can't make us allocate more than the file really holds.
+fn read_bytes<R: Read>(r: &mut R, len: usize) -> io::Result<Vec<u8>> {
+    let mut data = Vec::new();
+    r.take(len as u64).read_to_end(&mut data)?;
+    if data.len() != len {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!("string of {len} bytes runs past end of file"),
+        ));
+    }
+    Ok(data)
+}
+
 /// Read a UE4 `FString`: `i32` length prefix, empty/UTF-16/Latin-1 body per
 /// the sign of the length, trailing NUL stripped. Unlike
 /// `catalog::localization::read_fstring`, truncation is a hard error here —
@@ -85,9 +100,8 @@ fn read_fstring<R: Read>(r: &mut R) -> io::Result<String> {
     }
 
     if length < 0 {
-        let char_count = (-length) as usize;
-        let mut data = vec![0u8; char_count * 2];
-        r.read_exact(&mut data)?;
+        // `unsigned_abs` so `i32::MIN` doesn't overflow the negation.
+        let data = read_bytes(r, length.unsigned_abs() as usize * 2)?;
         let units: Vec<u16> = data
             .as_chunks::<2>()
             .0
@@ -97,8 +111,7 @@ fn read_fstring<R: Read>(r: &mut R) -> io::Result<String> {
         let s = String::from_utf16_lossy(&units);
         Ok(s.trim_end_matches('\0').to_string())
     } else {
-        let mut data = vec![0u8; length as usize];
-        r.read_exact(&mut data)?;
+        let data = read_bytes(r, length as usize)?;
         let s: String = data.iter().map(|&b| b as char).collect();
         Ok(s.trim_end_matches('\0').to_string())
     }
@@ -165,13 +178,14 @@ pub fn parse(path: &Path) -> Result<LocresDocument> {
         entries: Vec<PendingEntry>,
     }
 
-    let mut pending = Vec::with_capacity(namespace_count as usize);
+    // Counts come from the file: grow as entries are read, never reserve them.
+    let mut pending = Vec::new();
     for _ in 0..namespace_count {
         let namespace_hash = read_u32(&mut f)?;
         let namespace = read_fstring(&mut f)?;
         let key_count = read_u32(&mut f)?;
 
-        let mut entries = Vec::with_capacity(key_count as usize);
+        let mut entries = Vec::new();
         for _ in 0..key_count {
             let key_hash = read_u32(&mut f)?;
             let key = read_fstring(&mut f)?;
@@ -192,10 +206,23 @@ pub fn parse(path: &Path) -> Result<LocresDocument> {
         });
     }
 
-    f.seek(SeekFrom::Start(string_array_offset as u64))
+    let file_len = f
+        .metadata()
+        .with_context(|| format!("reading size of {}", path.display()))?
+        .len();
+    let string_array_offset = u64::try_from(string_array_offset)
+        .ok()
+        .filter(|&offset| offset < file_len)
+        .with_context(|| {
+            format!(
+                "{}: string array offset {string_array_offset} is outside the file ({file_len} bytes)",
+                path.display()
+            )
+        })?;
+    f.seek(SeekFrom::Start(string_array_offset))
         .with_context(|| format!("seeking to string array in {}", path.display()))?;
     let string_count = read_i32(&mut f)?;
-    let mut string_array = Vec::with_capacity(string_count.max(0) as usize);
+    let mut string_array = Vec::new();
     for _ in 0..string_count {
         let text = read_fstring(&mut f)?;
         let _ref_count = read_u32(&mut f)?; // advisory size hint, not needed to read
@@ -572,6 +599,48 @@ mod tests {
             buf.push(1); // version 1, unsupported
             fs::write(&path, buf).unwrap();
             assert!(parse(&path).is_err());
+        }
+
+        /// A version-2 header with `string_array_offset` and
+        /// `namespace_count` as given, followed by `rest`.
+        fn header(string_array_offset: i64, namespace_count: u32, rest: &[u8]) -> Vec<u8> {
+            let mut buf = LOCRES_MAGIC.to_vec();
+            buf.push(2);
+            buf.extend_from_slice(&string_array_offset.to_le_bytes());
+            buf.extend_from_slice(&0u32.to_le_bytes());
+            buf.extend_from_slice(&namespace_count.to_le_bytes());
+            buf.extend_from_slice(rest);
+            buf
+        }
+
+        #[test]
+        fn hostile_counts_and_lengths_error_instead_of_allocating() {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("hostile.locres");
+            for length in [i32::MAX, i32::MIN, -1_000_000_000] {
+                let mut rest = 0u32.to_le_bytes().to_vec(); // namespace_hash
+                rest.extend_from_slice(&length.to_le_bytes());
+                fs::write(&path, header(0, u32::MAX, &rest)).unwrap();
+                let err = parse(&path).unwrap_err();
+                assert!(
+                    format!("{err:#}").contains("past end of file"),
+                    "{length}: {err:#}"
+                );
+            }
+        }
+
+        #[test]
+        fn rejects_a_string_array_offset_outside_the_file() {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("offset.locres");
+            for offset in [-1, 1 << 40] {
+                fs::write(&path, header(offset, 0, &[])).unwrap();
+                let err = parse(&path).unwrap_err();
+                assert!(
+                    err.to_string().contains("outside the file"),
+                    "{offset}: {err}"
+                );
+            }
         }
 
         #[test]
