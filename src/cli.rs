@@ -1,5 +1,6 @@
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -290,6 +291,14 @@ fn asset_source(extract_dir: Option<PathBuf>, paks: Vec<PathBuf>) -> Option<Asse
 }
 
 /// Prints an `add-mod` stage to stderr when it starts and when it ends.
+/// Writes `value` to `path` as pretty-printed JSON.
+fn write_json<T: serde::Serialize + ?Sized>(path: &Path, value: &T) -> anyhow::Result<()> {
+    let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
+    serde_json::to_writer_pretty(&mut file, value)?;
+    file.flush()?;
+    Ok(())
+}
+
 fn print_progress(progress: add_mod::Progress) {
     if progress.done == 0 {
         eprintln!("{}: {} step(s)", progress.stage, progress.total);
@@ -347,13 +356,12 @@ where
                 },
                 None => anyhow::bail!("either --extract-dir or --pak is required"),
             };
-            let file = std::fs::File::create(&output)?;
             let entries = if full {
                 entries
             } else {
                 catalog::catalog_field_filter::filter_noise(&entries)
             };
-            serde_json::to_writer_pretty(file, &entries)?;
+            write_json(&output, &entries)?;
             println!(
                 "parsed {} stockpilable {} errors {} total_files {}",
                 stats.parsed, stats.stockpilable, stats.errors, stats.total_files
@@ -479,8 +487,7 @@ where
             reference,
         } => {
             let dumped = locres::dump(&input, reference.as_deref())?;
-            let file = std::fs::File::create(&output)?;
-            serde_json::to_writer_pretty(file, &dumped)?;
+            write_json(&output, &dumped)?;
             println!(
                 "dumped {} namespace(s) to {}",
                 dumped.namespaces.len(),
@@ -488,8 +495,7 @@ where
             );
         }
         Commands::LocresPack { input, output } => {
-            let file = std::fs::File::open(&input)?;
-            let dump_doc: locres::DumpDocument = serde_json::from_reader(file)?;
+            let dump_doc: locres::DumpDocument = serde_json::from_slice(&std::fs::read(&input)?)?;
             let doc = locres::pack(&dump_doc)?;
             locres::write(&doc, &output)?;
             println!("packed to {}", output.display());

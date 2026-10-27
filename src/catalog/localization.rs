@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -220,7 +220,7 @@ fn read_namespace_strings<R: Read>(
 }
 
 fn parse_locres_inner(filepath: &Path) -> io::Result<HashMap<String, String>> {
-    let mut f = File::open(filepath)?;
+    let mut f = BufReader::new(File::open(filepath)?);
 
     let mut magic = [0u8; 16];
     f.read_exact(&mut magic)?;
@@ -239,7 +239,7 @@ fn parse_locres_inner(filepath: &Path) -> io::Result<HashMap<String, String>> {
         read_u32(&mut f)?; // entries count, unused
     }
 
-    let mut text_budget = TextBudget::new(f.metadata()?.len());
+    let mut text_budget = TextBudget::new(f.get_ref().metadata()?.len());
     read_namespace_strings(&mut f, version, &string_array, &mut text_budget)
 }
 

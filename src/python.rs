@@ -4,6 +4,7 @@
 //! `database.h5` etc.) exactly like the CLI does, and returns build
 //! statistics (or the raw conversion output) as native Python objects.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -143,10 +144,11 @@ fn asset_source(
     }
 }
 
-fn write_json(path: &Path, value: &[serde_json::Value]) -> PyResult<()> {
-    let file = std::fs::File::create(path).map_err(io_err)?;
-    serde_json::to_writer_pretty(file, value)
-        .map_err(|e| PyErr::new::<PyRuntimeError, _>(e.to_string()))
+fn write_json<T: serde::Serialize + ?Sized>(path: &Path, value: &T) -> PyResult<()> {
+    let mut file = std::io::BufWriter::new(std::fs::File::create(path).map_err(io_err)?);
+    serde_json::to_writer_pretty(&mut file, value)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(e.to_string()))?;
+    file.flush().map_err(io_err)
 }
 
 /// Extract files from a .pak archive.
@@ -450,9 +452,7 @@ fn locres_dump(
 ) -> PyResult<Py<PyAny>> {
     let namespaces = py.detach(|| -> PyResult<usize> {
         let dumped = locres::dump(Path::new(input), reference.map(Path::new)).map_err(to_py_err)?;
-        let file = std::fs::File::create(output).map_err(io_err)?;
-        serde_json::to_writer_pretty(file, &dumped)
-            .map_err(|e| PyErr::new::<PyRuntimeError, _>(e.to_string()))?;
+        write_json(Path::new(output), &dumped)?;
         Ok(dumped.namespaces.len())
     })?;
 
@@ -469,8 +469,8 @@ fn locres_dump(
 #[pyfunction]
 fn locres_pack(py: Python<'_>, input: &str, output: &str) -> PyResult<()> {
     py.detach(|| {
-        let file = std::fs::File::open(input).map_err(io_err)?;
-        let dump_doc: locres::DumpDocument = serde_json::from_reader(file)
+        let bytes = std::fs::read(input).map_err(io_err)?;
+        let dump_doc: locres::DumpDocument = serde_json::from_slice(&bytes)
             .map_err(|e| PyErr::new::<PyRuntimeError, _>(e.to_string()))?;
         let doc = locres::pack(&dump_doc).map_err(to_py_err)?;
         locres::write(&doc, Path::new(output)).map_err(to_py_err)

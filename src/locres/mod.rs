@@ -13,7 +13,7 @@
 //! and key the other languages use, which is why `--reference` takes it.
 
 use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -179,7 +179,8 @@ impl TextBudget {
 /// Parse a version-2 `.locres` file, preserving every namespace, key, hash,
 /// and string exactly.
 pub fn parse(path: &Path) -> Result<LocresDocument> {
-    let mut f = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut f =
+        BufReader::new(File::open(path).with_context(|| format!("opening {}", path.display()))?);
 
     let mut magic = [0u8; 16];
     f.read_exact(&mut magic)
@@ -242,6 +243,7 @@ pub fn parse(path: &Path) -> Result<LocresDocument> {
     }
 
     let file_len = f
+        .get_ref()
         .metadata()
         .with_context(|| format!("reading size of {}", path.display()))?
         .len();
