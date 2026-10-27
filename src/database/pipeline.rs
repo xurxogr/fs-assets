@@ -29,6 +29,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use image::DynamicImage;
 use serde_json::Value;
@@ -153,29 +154,28 @@ fn decode_uasset_icon(path: &Path) -> anyhow::Result<image::DynamicImage> {
 /// missing or fail to decode without counting against the run's stats —
 /// used for the subicon overlay and the shared crate-icon texture, which
 /// (unlike an item's own main icon) don't have to exist for a template to
-/// still be built, just for that particular overlay to be skipped.
+/// still be built, just for that particular overlay to be skipped. A miss is
+/// cached too, so a broken overlay is only tried (and reported) once.
 fn load_optional_image<F>(
     path: &str,
     resolve_icon: &F,
-    cache: &mut HashMap<String, image::DynamicImage>,
-) -> Option<image::DynamicImage>
+    cache: &mut HashMap<String, Option<Rc<image::DynamicImage>>>,
+) -> Option<Rc<image::DynamicImage>>
 where
     F: Fn(&str) -> Option<PathBuf>,
 {
     if let Some(cached) = cache.get(path) {
-        return Some(cached.clone());
+        return cached.clone();
     }
-    let resolved = resolve_icon(path)?;
-    match decode_icon(&resolved) {
-        Ok(img) => {
-            cache.insert(path.to_string(), img.clone());
-            Some(img)
-        }
+    let decoded = resolve_icon(path).and_then(|resolved| match decode_icon(&resolved) {
+        Ok(img) => Some(Rc::new(img)),
         Err(e) => {
             eprintln!("build-db: {e}");
             None
         }
-    }
+    });
+    cache.insert(path.to_string(), decoded.clone());
+    decoded
 }
 
 /// Builds the [`IconTemplate`]s for every catalog item with a resolvable
@@ -184,11 +184,11 @@ where
 /// [`database::SUPPORTED_RESOLUTIONS`] entry (with its `SubTypeIcon` overlay
 /// blended in when present and resolvable), plus a second `crated=true`
 /// template when the item is cratable and the shared crate-icon texture
-/// ([`database::CRATE_ICON_OBJECT_PATH`]) resolves. Decoding the same icon
-/// path more than once (e.g. two catalog items sharing one texture, or every
-/// cratable item sharing the one crate icon) only decodes/resizes it once per
-/// resolution — decoded images are cached by path for the duration of the
-/// call.
+/// ([`database::CRATE_ICON_OBJECT_PATH`]) resolves. The overlays (subicons
+/// and the crate icon, a few dozen textures shared by many items) are decoded
+/// once and cached for the call; each main icon is decoded for its item and
+/// dropped after, since the game's items almost never share one and keeping
+/// them all would hold every decoded texture until the end.
 pub fn build_database_from_catalog<F>(
     catalog: &[Value],
     resolve_icon: F,
@@ -224,7 +224,7 @@ where
         .map(|r| (*r, Vec::new()))
         .collect();
     let mut stats = DatabaseBuildStats::default();
-    let mut image_cache: HashMap<String, image::DynamicImage> = HashMap::new();
+    let mut overlay_cache: HashMap<String, Option<Rc<image::DynamicImage>>> = HashMap::new();
 
     progress(0, catalog.len());
     for (index, entry) in catalog.iter().enumerate() {
@@ -245,39 +245,30 @@ where
             continue;
         }
 
-        let image = match image_cache.get(&item.icon_path) {
-            Some(cached) => cached.clone(),
-            None => {
-                let Some(path) = resolve_icon(&item.icon_path) else {
-                    stats.icons_missing += 1;
-                    continue;
-                };
-
-                match decode_icon(&path) {
-                    Ok(img) => {
-                        image_cache.insert(item.icon_path.clone(), img.clone());
-                        img
-                    }
-                    Err(e) => {
-                        eprintln!("build-db: {e}");
-                        stats.decode_errors += 1;
-                        continue;
-                    }
-                }
+        let Some(path) = resolve_icon(&item.icon_path) else {
+            stats.icons_missing += 1;
+            continue;
+        };
+        let image = match decode_icon(&path) {
+            Ok(img) => img,
+            Err(e) => {
+                eprintln!("build-db: {e}");
+                stats.decode_errors += 1;
+                continue;
             }
         };
 
         let subicon = item
             .subicon_path
             .as_ref()
-            .and_then(|path| load_optional_image(path, &resolve_icon, &mut image_cache));
+            .and_then(|path| load_optional_image(path, &resolve_icon, &mut overlay_cache));
         let crate_icon = item
             .cratable
             .then(|| {
                 load_optional_image(
                     database::CRATE_ICON_OBJECT_PATH,
                     &resolve_icon,
-                    &mut image_cache,
+                    &mut overlay_cache,
                 )
             })
             .flatten();
@@ -287,8 +278,8 @@ where
                 &item,
                 mod_name,
                 &image,
-                subicon.as_ref(),
-                crate_icon.as_ref(),
+                subicon.as_deref(),
+                crate_icon.as_deref(),
                 resolution,
             );
             resolutions

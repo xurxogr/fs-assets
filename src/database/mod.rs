@@ -280,18 +280,29 @@ pub fn is_blank_subicon(subicon: &DynamicImage) -> bool {
         return true;
     }
 
-    let visible: Vec<f64> = rgba
+    // One pass of exact integer sums over the visible pixels' channels,
+    // rather than collecting them: a large subicon would otherwise need 24
+    // bytes per pixel just for the statistics.
+    let (mut pixels, mut sum, mut sum_sq) = (0u64, 0u64, 0u128);
+    for px in rgba
         .pixels()
         .filter(|px| px[3] > BLANK_SUBICON_VISIBLE_ALPHA)
-        .flat_map(|px| [px[0] as f64, px[1] as f64, px[2] as f64])
-        .collect();
-    if ((visible.len() / 3) as f64 / total as f64) < BLANK_SUBICON_VISIBLE_RATIO {
+    {
+        pixels += 1;
+        for &channel in &px.0[..3] {
+            sum += u64::from(channel);
+            sum_sq += u128::from(channel) * u128::from(channel);
+        }
+    }
+    if (pixels as f64 / total as f64) < BLANK_SUBICON_VISIBLE_RATIO {
         return true;
     }
 
-    let count = visible.len() as f64;
-    let mean = visible.iter().sum::<f64>() / count;
-    let variance = visible.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / count;
+    let count = u128::from(pixels * 3);
+    let mean = sum as f64 / count as f64;
+    // count² · variance = count · Σx² − (Σx)², exact in integers.
+    let variance =
+        (count * sum_sq - u128::from(sum) * u128::from(sum)) as f64 / (count as f64 * count as f64);
     variance.sqrt() < BLANK_SUBICON_SOLID_STD && mean < BLANK_SUBICON_DARK_MEAN
 }
 
