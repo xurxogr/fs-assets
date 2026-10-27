@@ -54,6 +54,8 @@ clap = { version = "4", features = ["derive"] }
 repak = { git = "https://github.com/xurxogr/repak", rev = "4c0809080080472b666db489adfc4671e493ac43" }
 # Recursive directory walk for `pack`'s "directory -> .pak" input traversal.
 walkdir = "2"
+# SIMD substring search for `grep-strings`.
+memchr = "2.8.2"
 # Pure-Rust BC1/BC3/BC5/BC7 (DXT1/DXT5/BC5/BC7) block decoder for real cooked
 # Texture2D mip chains (see uasset_to_png's compressed-mip-chain path).
 # unreal_asset has no FTexturePlatformData support, so the container itself

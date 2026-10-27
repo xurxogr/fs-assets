@@ -9,6 +9,8 @@
 
 use std::path::{Path, PathBuf};
 
+use memchr::memmem::Finder;
+
 /// Which on-disk `FString` encoding a match was found in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Encoding {
@@ -38,11 +40,12 @@ pub struct GrepMatch {
 /// file that matches in both encodings is reported once per encoding, sorted
 /// by path then encoding.
 pub fn search_content_dir(content_dir: &Path, pattern: &str) -> anyhow::Result<Vec<GrepMatch>> {
-    let ascii_needle = pattern.as_bytes();
     let utf16_needle: Vec<u8> = pattern
         .encode_utf16()
         .flat_map(|unit| unit.to_le_bytes())
         .collect();
+    let ascii = Finder::new(pattern.as_bytes());
+    let utf16 = Finder::new(&utf16_needle);
 
     let mut matches = Vec::new();
     for entry in walkdir::WalkDir::new(content_dir)
@@ -61,13 +64,13 @@ pub fn search_content_dir(content_dir: &Path, pattern: &str) -> anyhow::Result<V
         }
 
         let data = std::fs::read(path)?;
-        if contains_bytes(&data, ascii_needle) {
+        if contains_bytes(&data, &ascii) {
             matches.push(GrepMatch {
                 path: path.to_path_buf(),
                 encoding: Encoding::Ascii,
             });
         }
-        if contains_bytes(&data, &utf16_needle) {
+        if contains_bytes(&data, &utf16) {
             matches.push(GrepMatch {
                 path: path.to_path_buf(),
                 encoding: Encoding::Utf16Le,
@@ -97,13 +100,10 @@ impl Ord for Encoding {
     }
 }
 
-fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() || needle.len() > haystack.len() {
-        return false;
-    }
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
+/// Whether `haystack` contains `needle`'s needle; an empty needle never
+/// matches.
+fn contains_bytes(haystack: &[u8], needle: &Finder<'_>) -> bool {
+    !needle.needle().is_empty() && needle.find(haystack).is_some()
 }
 
 #[cfg(test)]

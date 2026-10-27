@@ -373,6 +373,7 @@ dependencies = [
  "hdf5-sys",
  "image",
  "libz-sys",
+ "memchr",
  "pyo3",
  "repak",
  "serde",
