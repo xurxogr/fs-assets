@@ -143,6 +143,19 @@ fn write_file(
     Ok(())
 }
 
+/// [`read_database`] of `path`, or, when there is no database there yet,
+/// the empty one: an empty `Vec` per
+/// [`crate::database::SUPPORTED_RESOLUTIONS`] entry.
+pub fn read_database_or_empty(path: &Path) -> anyhow::Result<BTreeMap<i32, Vec<IconTemplate>>> {
+    if path.exists() {
+        return read_database(path);
+    }
+    Ok(crate::database::SUPPORTED_RESOLUTIONS
+        .iter()
+        .map(|&resolution| (resolution, Vec::new()))
+        .collect())
+}
+
 /// Reads back every [`IconTemplate`] from a database previously written by
 /// [`write_database`], one `Vec` per [`crate::database::SUPPORTED_RESOLUTIONS`]
 /// entry (a resolution absent from the file — shouldn't happen for a file
@@ -665,6 +678,17 @@ mod tests {
 
     mod read_database_tests {
         use super::*;
+
+        #[test]
+        fn a_missing_database_reads_as_the_empty_one() {
+            let tmp = tempfile::tempdir().unwrap();
+            let resolutions = read_database_or_empty(&tmp.path().join("db.h5")).unwrap();
+            assert_eq!(
+                resolutions.keys().copied().collect::<Vec<_>>(),
+                crate::database::SUPPORTED_RESOLUTIONS.to_vec()
+            );
+            assert!(resolutions.values().all(|t| t.is_empty()));
+        }
 
         #[test]
         fn round_trips_empty_database() {

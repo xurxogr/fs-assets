@@ -384,14 +384,7 @@ pub fn add_mod_to_database_with_progress(
     }
     let _lock = hdf5_writer::lock_database(output_path)?;
 
-    let existing = if output_path.exists() {
-        hdf5_writer::read_database(output_path)?
-    } else {
-        database::SUPPORTED_RESOLUTIONS
-            .iter()
-            .map(|r| (*r, Vec::new()))
-            .collect()
-    };
+    let existing = hdf5_writer::read_database_or_empty(output_path)?;
 
     let overlays = overlay_icon_paths(catalog);
     let loader = filesystem_icon_loader_with_fallback(extract_dir, vanilla_extract_dir, &overlays);
@@ -553,14 +546,7 @@ pub fn modify_icon_in_database(
     database::check_template_name("code", &identity.code)?;
     database::check_template_name("mod name", &identity.mod_name)?;
     let _lock = hdf5_writer::lock_database(output_path)?;
-    let existing = if output_path.exists() {
-        hdf5_writer::read_database(output_path)?
-    } else {
-        database::SUPPORTED_RESOLUTIONS
-            .iter()
-            .map(|r| (*r, Vec::new()))
-            .collect()
-    };
+    let existing = hdf5_writer::read_database_or_empty(output_path)?;
 
     let updated = if remove {
         remove_icon_from_templates(existing, resolutions, identity)?
