@@ -483,18 +483,14 @@ pub fn add_icon_to_templates(
         cratable: false,
     };
 
+    // Converted once for every resolution.
+    let prepared = database::PreparedIcon::new(image.clone(), None, None);
     for &resolution in resolutions {
         let bucket = existing.entry(resolution).or_default();
         // A non-cratable item yields exactly the plain composited template.
-        let mut template = database::build_icon_templates(
-            &item,
-            &identity.mod_name,
-            image,
-            None,
-            None,
-            resolution,
-        )
-        .swap_remove(0);
+        let mut template = prepared
+            .templates(&item, &identity.mod_name, resolution)
+            .swap_remove(0);
         template.crated = identity.crated;
 
         match bucket.iter().position(|t| identity.matches(t)) {
