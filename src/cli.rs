@@ -407,7 +407,7 @@ fn run_command(
             }
             ConvertFormat::Png => {
                 let png = convert::uasset_to_png(&input)?;
-                std::fs::write(&output, png)
+                crate::atomic_write::write_bytes(&output, &png)
                     .with_context(|| format!("writing {}", output.display()))?;
             }
         },

@@ -34,6 +34,15 @@ pub(crate) fn write_json<T: serde::Serialize + ?Sized>(
     persist(temp.into_temp_path(), dest)
 }
 
+/// Replaces `dest` with `bytes`.
+pub(crate) fn write_bytes(dest: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let mut temp = tempfile::Builder::new()
+        .suffix(".tmp")
+        .tempfile_in(parent_dir(dest))?;
+    temp.write_all(bytes)?;
+    persist(temp.into_temp_path(), dest)
+}
+
 /// The directory holding `path`, `.` for a bare file name.
 fn parent_dir(path: &Path) -> &Path {
     match path.parent() {
@@ -69,6 +78,18 @@ mod tests {
         temp.write_all(b"new").unwrap();
 
         persist(temp.into_temp_path(), &dest).unwrap();
+
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new");
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn writes_bytes_leaving_no_temporary_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("out.bin");
+        std::fs::write(&dest, b"old").unwrap();
+
+        write_bytes(&dest, b"new").unwrap();
 
         assert_eq!(std::fs::read(&dest).unwrap(), b"new");
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);

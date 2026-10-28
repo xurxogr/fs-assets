@@ -386,7 +386,8 @@ pub fn write(doc: &LocresDocument, path: &Path) -> Result<()> {
         .copy_from_slice(&string_array_offset.to_le_bytes());
     buf[entries_count_pos..entries_count_pos + 4].copy_from_slice(&total_entries.to_le_bytes());
 
-    fs::write(path, buf).with_context(|| format!("writing {}", path.display()))?;
+    crate::atomic_write::write_bytes(path, &buf)
+        .with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 
