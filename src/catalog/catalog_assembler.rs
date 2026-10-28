@@ -353,100 +353,101 @@ pub fn expand_data(
 /// [`Blueprints::extract_path`] returns its own copy of what it remembers, so
 /// merging it in can't alter what later lookups get.
 pub fn enrich_item_component_class(data: &mut Map<String, Value>, blueprints: &Blueprints) {
-    let Some(item_comp_raw) = data.get("ItemComponentClass").cloned() else {
+    let Some((mut item_comp, component_path)) =
+        data.get("ItemComponentClass").and_then(component_reference)
+    else {
         return;
-    };
-
-    // The component's path, as `blueprint_object_path` takes it, from either
-    // a `/Game/Blueprints/...` reference or a normalized
-    // `War/Content/Blueprints/....0` object path.
-    let (mut item_comp, component_path) = match &item_comp_raw {
-        Value::String(obj_path) => {
-            let mut m = Map::new();
-            m.insert("ObjectPath".to_string(), json!(obj_path));
-            (m, obj_path.clone())
-        }
-        Value::Object(m) => {
-            let Some(obj_path) = m.get("ObjectPath").and_then(Value::as_str) else {
-                return;
-            };
-            if obj_path.is_empty() {
-                return;
-            }
-            let relative_path = obj_path
-                .strip_prefix("War/Content/Blueprints/")
-                .unwrap_or(obj_path);
-            let relative_path = relative_path
-                .strip_suffix(".0")
-                .unwrap_or(relative_path)
-                .to_string();
-            (m.clone(), relative_path)
-        }
-        _ => return,
     };
 
     let comp_data = blueprint_object_path(&component_path)
         .and_then(|object_path| blueprints.extract_path(&object_path));
-    let Some(comp_data) = comp_data else {
-        // Parser couldn't load the component blueprint: still write back the
-        // normalized (string -> dict) shape so consumers always see a
-        // dict, even when the component couldn't be parsed.
-        data.insert("ItemComponentClass".to_string(), Value::Object(item_comp));
-        return;
-    };
-
-    for (key, value) in &comp_data {
-        if key == "ObjectPath" {
-            continue;
+    if let Some(comp_data) = comp_data {
+        merge_component_data(&mut item_comp, comp_data);
+        if let Some(proj_class) = resolve_projectile_class(&item_comp, blueprints) {
+            item_comp.insert("ProjectileClass".to_string(), Value::Object(proj_class));
         }
-        if key == "MultiAmmo" {
-            match value {
-                Value::Array(arr) if !arr.is_empty() => {
-                    item_comp.insert("MultiAmmo".to_string(), value.clone());
-                }
-                Value::Object(m) => {
-                    if let Some(names) = m.get("CompatibleAmmoNames").and_then(Value::as_array) {
-                        if !names.is_empty() {
-                            item_comp.insert("MultiAmmo".to_string(), Value::Array(names.clone()));
-                        }
-                    }
-                }
-                _ => {}
-            }
-            continue;
-        }
-        item_comp.insert(key.clone(), value.clone());
     }
+    // Written back even when the component couldn't be parsed, so consumers
+    // always see the normalized (string -> dict) shape.
+    data.insert("ItemComponentClass".to_string(), Value::Object(item_comp));
+}
 
-    // Resolve ProjectileClasses to get ExplosiveCodeName etc. Skip for
-    // multi-ammo weapons (they use different projectiles per ammo).
+/// `ItemComponentClass` as a dict, with the component's path as
+/// [`blueprint_object_path`] takes it, from either a `/Game/Blueprints/...`
+/// reference or a dict holding a normalized `War/Content/Blueprints/....0`
+/// `ObjectPath`. `None` when it names no component.
+fn component_reference(item_comp: &Value) -> Option<(Map<String, Value>, String)> {
+    match item_comp {
+        Value::String(obj_path) => {
+            let mut m = Map::new();
+            m.insert("ObjectPath".to_string(), json!(obj_path));
+            Some((m, obj_path.clone()))
+        }
+        Value::Object(m) => {
+            let obj_path = m
+                .get("ObjectPath")
+                .and_then(Value::as_str)
+                .filter(|path| !path.is_empty())?;
+            let relative_path = obj_path
+                .strip_prefix("War/Content/Blueprints/")
+                .unwrap_or(obj_path);
+            let relative_path = relative_path.strip_suffix(".0").unwrap_or(relative_path);
+            Some((m.clone(), relative_path.to_string()))
+        }
+        _ => None,
+    }
+}
+
+/// Copies the component blueprint's `comp_data` into `item_comp`, except its
+/// `ObjectPath`, with `MultiAmmo` kept only when it lists some ammo (taken
+/// from `CompatibleAmmoNames` when it is a dict).
+fn merge_component_data(item_comp: &mut Map<String, Value>, comp_data: Map<String, Value>) {
+    for (key, value) in comp_data {
+        match key.as_str() {
+            "ObjectPath" => {}
+            "MultiAmmo" => {
+                let ammo = match value {
+                    Value::Array(arr) => arr,
+                    Value::Object(mut m) => match m.remove("CompatibleAmmoNames") {
+                        Some(Value::Array(names)) => names,
+                        _ => continue,
+                    },
+                    _ => continue,
+                };
+                if !ammo.is_empty() {
+                    item_comp.insert(key, Value::Array(ammo));
+                }
+            }
+            _ => {
+                item_comp.insert(key, value);
+            }
+        }
+    }
+}
+
+/// The blueprint data of the component's first `ProjectileClasses` entry,
+/// without its `ObjectPath`, to get `ExplosiveCodeName` etc. `None` for a
+/// multi-ammo weapon, which uses a different projectile per ammo.
+fn resolve_projectile_class(
+    item_comp: &Map<String, Value>,
+    blueprints: &Blueprints,
+) -> Option<Map<String, Value>> {
     let multi_ammo_len = item_comp
         .get("MultiAmmo")
         .and_then(Value::as_array)
-        .map(|a| a.len())
-        .unwrap_or(0);
-
-    if multi_ammo_len <= 1 {
-        if let Some(Value::Array(projectile_classes)) = item_comp.get("ProjectileClasses") {
-            if let Some(Value::String(first_proj)) = projectile_classes.first() {
-                if first_proj.starts_with("/Game/") {
-                    let proj_data = blueprint_object_path(first_proj)
-                        .and_then(|object_path| blueprints.extract_path(&object_path));
-                    if let Some(proj_data) = proj_data {
-                        let mut proj_class = Map::new();
-                        for (k, v) in proj_data {
-                            if k != "ObjectPath" {
-                                proj_class.insert(k, v);
-                            }
-                        }
-                        item_comp.insert("ProjectileClass".to_string(), Value::Object(proj_class));
-                    }
-                }
-            }
-        }
+        .map_or(0, Vec::len);
+    if multi_ammo_len > 1 {
+        return None;
     }
-
-    data.insert("ItemComponentClass".to_string(), Value::Object(item_comp));
+    let first_proj = item_comp
+        .get("ProjectileClasses")?
+        .as_array()?
+        .first()?
+        .as_str()
+        .filter(|path| path.starts_with("/Game/"))?;
+    let mut proj_data = blueprints.extract_path(&blueprint_object_path(first_proj)?)?;
+    proj_data.remove("ObjectPath");
+    Some(proj_data)
 }
 
 // ---------------------------------------------------------------------
@@ -581,7 +582,24 @@ pub fn assemble_catalog_entry(
         .unwrap_or("")
         .to_string();
 
-    // Extract localization GUIDs from text fields.
+    extract_localization_keys(&mut data, ctx.loc_service);
+    expand_data(&mut data, &code_name, &ctx.tables, ctx.blueprints);
+
+    let empty_ammo_asset = json!({"imports": [], "exports": []});
+    let ammo_asset = ctx.tables.ammo_dynamic_data.unwrap_or(&empty_ammo_asset);
+    add_ammo_and_damage_type(&mut data, ammo_asset, ctx);
+    add_subtype_icon(&mut data, &code_name, ammo_asset);
+    enrich_locales(&mut data, LOCALIZABLE_FIELDS, ctx.loc_service);
+    add_production_categories(&mut data, &code_name, ctx.production_categories);
+    add_stockpile_rules(&mut data, category);
+
+    Some(Value::Object(data))
+}
+
+/// Moves each localizable text field's GUID to a `{field}Key` field,
+/// leaving its text in the field: from a `{Text, Guid}` dict, or looked up
+/// for a bare GUID string.
+fn extract_localization_keys(data: &mut Map<String, Value>, loc_service: &LocalizationLookup) {
     for field in LOCALIZABLE_FIELDS {
         let Some(value) = data.get(*field).cloned() else {
             continue;
@@ -599,81 +617,84 @@ pub fn assemble_catalog_entry(
                 data.insert(format!("{field}Key"), json!(s));
                 data.insert(
                     (*field).to_string(),
-                    json!(ctx.loc_service.get_with_fallback(s, None)),
+                    json!(loc_service.get_with_fallback(s, None)),
                 );
             }
             _ => {}
         }
     }
+}
 
-    // Expand with data tables and referenced blueprints.
-    expand_data(&mut data, &code_name, &ctx.tables, ctx.blueprints);
+/// For an item that uses ammo, adds the ammo's `AmmoDynamicData` row when
+/// missing (for weapons) and resolves its `DamageType` import reference (an
+/// index like -25) to the full damage type.
+fn add_ammo_and_damage_type(
+    data: &mut Map<String, Value>,
+    ammo_asset: &Value,
+    ctx: &AssemblerContext,
+) {
+    let Some(ammo_code) =
+        damage_type_resolver::get_ammo_code(&Value::Object(data.clone()), ammo_asset)
+    else {
+        return;
+    };
 
-    // Add AmmoDynamicData and resolve DamageType.
-    let empty_ammo_asset = json!({"imports": [], "exports": []});
-    let ammo_asset = ctx.tables.ammo_dynamic_data.unwrap_or(&empty_ammo_asset);
-    let ammo_code = damage_type_resolver::get_ammo_code(&Value::Object(data.clone()), ammo_asset);
-
-    if let Some(ammo_code) = &ammo_code {
-        // Add AmmoDynamicData from ammo if not already present (for weapons
-        // using ammo).
-        if !data.contains_key("AmmoDynamicData") {
-            if let Some(ammo_dynamic) =
-                data_table_lookup::get_ammo_dynamic_data(ammo_asset, ammo_code)
-            {
-                data.insert(
-                    "AmmoDynamicData".to_string(),
-                    clean_data_table_entry(&ammo_dynamic),
-                );
-            }
+    if !data.contains_key("AmmoDynamicData") {
+        if let Some(ammo_dynamic) = data_table_lookup::get_ammo_dynamic_data(ammo_asset, &ammo_code)
+        {
+            data.insert(
+                "AmmoDynamicData".to_string(),
+                clean_data_table_entry(&ammo_dynamic),
+            );
         }
+    }
 
-        // Resolve DamageType (expand import index like -25 to full object).
-        let needs_resolution = matches!(
-            data.get("AmmoDynamicData"),
-            Some(Value::Object(m)) if !matches!(m.get("DamageType"), Some(Value::Object(_)))
+    let Some(Value::Object(ammo_map)) = data.get_mut("AmmoDynamicData") else {
+        return;
+    };
+    if matches!(ammo_map.get("DamageType"), Some(Value::Object(_))) {
+        return;
+    }
+    if let Some(damage_type) = damage_type_resolver::resolve_damage_type(
+        &ammo_code,
+        ammo_asset,
+        ctx.blueprints,
+        ctx.loc_service,
+    ) {
+        ammo_map.insert("DamageType".to_string(), damage_type);
+    }
+}
+
+/// Adds the item's `ProductionCategories`, if any.
+fn add_production_categories(
+    data: &mut Map<String, Value>,
+    code_name: &str,
+    production_categories: &HashMap<String, HashMap<String, String>>,
+) {
+    if let Some(categories) =
+        data_table_lookup::get_production_categories(production_categories, code_name)
+    {
+        let categories = categories
+            .iter()
+            .map(|(k, v)| (k.clone(), json!(v)))
+            .collect();
+        data.insert(
+            "ProductionCategories".to_string(),
+            Value::Object(categories),
         );
-        if needs_resolution {
-            if let Some(damage_type) = damage_type_resolver::resolve_damage_type(
-                ammo_code,
-                ammo_asset,
-                ctx.blueprints,
-                ctx.loc_service,
-            ) {
-                if let Some(Value::Object(ammo_map)) = data.get_mut("AmmoDynamicData") {
-                    ammo_map.insert("DamageType".to_string(), damage_type);
-                }
-            }
-        }
     }
+}
 
-    // Add SubTypeIcon.
-    add_subtype_icon(&mut data, &code_name, ammo_asset);
-
-    // Add locales.
-    enrich_locales(&mut data, LOCALIZABLE_FIELDS, ctx.loc_service);
-
-    // Add ProductionCategories.
-    let prod_cats =
-        data_table_lookup::get_production_categories(ctx.production_categories, &code_name);
-    if let Some(pc) = prod_cats {
-        let mut m = Map::new();
-        for (k, v) in pc {
-            m.insert(k.clone(), json!(v));
-        }
-        data.insert("ProductionCategories".to_string(), Value::Object(m));
-    }
-
-    // Resolve stockpile rules (category, loose and crated storage).
-    let rules = stockpile_classifier::classify(&data, category);
+/// Adds the stockpile rules: `StockpileCategory`, and whether the item is
+/// stored loose (`bIsStockpilable`) and crated (`bIsCratable`).
+fn add_stockpile_rules(data: &mut Map<String, Value>, category: StockpileCategory) {
+    let rules = stockpile_classifier::classify(data, category);
     data.insert(
         "StockpileCategory".to_string(),
         json!(rules.category.as_str()),
     );
     data.insert("bIsStockpilable".to_string(), json!(rules.stockpilable));
     data.insert("bIsCratable".to_string(), json!(rules.cratable));
-
-    Some(Value::Object(data))
 }
 
 // ---------------------------------------------------------------------
