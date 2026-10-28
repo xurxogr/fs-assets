@@ -17,11 +17,14 @@ pub mod hdf5_writer;
 pub mod pillow_resample;
 pub mod pipeline;
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use image::{DynamicImage, RgbaImage};
 use serde_json::Value;
 
 use crate::catalog::stockpile_classifier::StockpileCategory;
-use pillow_resample::{flatten_on_black_to_bgr, resize_lanczos_rgba, LanczosSource};
+use pillow_resample::{flatten_on_black_to_bgr, LanczosSource};
 
 /// Item faction classification, mirroring `fs-ocr`'s `ItemFaction` enum
 /// (`fs-ocr/src/enums/item_faction.rs`) **exactly**, including discriminant
@@ -342,18 +345,17 @@ fn tint_overlay(overlay: &RgbaImage) -> RgbaImage {
     tinted
 }
 
-/// Resizes `tinted` (an overlay already passed through [`tint_overlay`]) to
-/// `size * SUBICON_ASPECT_RATIO` with Pillow's LANCZOS and alpha-blends it
+/// Resizes `overlay` to `size * SUBICON_ASPECT_RATIO` with Pillow's LANCZOS and alpha-blends it
 /// (its alpha weighted by `SUBICON_ALPHA`) into a corner of `base`
 /// (`size x size` BGR bytes), in place. `top_left` picks the subicon's
 /// corner; the crate overlay uses the opposite (bottom-right) corner. The
 /// blend is computed in `f32` (numpy float32 semantics).
-fn blend_overlay_bgr(base: &mut [u8], size: u32, tinted: &LanczosSource, top_left: bool) {
+fn blend_overlay_bgr(base: &mut [u8], size: u32, overlay: &PreparedOverlay, top_left: bool) {
     let overlay_size = ((size as f64) * SUBICON_ASPECT_RATIO) as u32;
     if overlay_size == 0 || overlay_size > size {
         return;
     }
-    let resized = tinted.resize(overlay_size, overlay_size);
+    let resized = overlay.resized(overlay_size);
     let (x0, y0) = if top_left {
         (0, 0)
     } else {
@@ -374,19 +376,14 @@ fn blend_overlay_bgr(base: &mut [u8], size: u32, tinted: &LanczosSource, top_lef
 /// way the templates get it (tinted, `SUBICON_ASPECT_RATIO` of the icon's
 /// shorter side, alpha weighted by `SUBICON_ALPHA`), but alpha-composited
 /// onto the icon instead of a black background, so the icon's transparency
-/// is kept. A blank placeholder subicon (see [`is_blank_subicon`]) is not
-/// drawn.
-pub fn composite_subicon(image: &DynamicImage, subicon: &DynamicImage) -> RgbaImage {
+/// is kept.
+pub fn composite_subicon(image: &DynamicImage, subicon: &PreparedOverlay) -> RgbaImage {
     let mut base = image.to_rgba8();
     let overlay_size = (base.width().min(base.height()) as f64 * SUBICON_ASPECT_RATIO) as u32;
-    if overlay_size == 0 || is_blank_subicon(subicon) {
+    if overlay_size == 0 {
         return base;
     }
-    let resized = resize_lanczos_rgba(
-        &tint_overlay(&subicon.to_rgba8()),
-        overlay_size,
-        overlay_size,
-    );
+    let resized = subicon.resized(overlay_size);
 
     for (x, y, px) in resized.enumerate_pixels() {
         let overlay_alpha = px[3] as f32 / 255.0 * SUBICON_ALPHA;
@@ -617,39 +614,76 @@ pub fn build_icon_templates(
     crate_icon: Option<&DynamicImage>,
     resolution_height: i32,
 ) -> Vec<IconTemplate> {
-    PreparedIcon::new(image.clone(), subicon, crate_icon).templates(
-        item,
-        mod_name,
-        resolution_height,
+    PreparedIcon::new(
+        image.clone(),
+        subicon.and_then(PreparedOverlay::subicon).map(Arc::new),
+        crate_icon.map(|crate_icon| Arc::new(PreparedOverlay::new(crate_icon))),
     )
+    .templates(item, mod_name, resolution_height)
 }
 
-/// An item's main icon and overlays converted once for every resolution its
-/// templates are built at: the icon as RGBA, the overlays with their color
-/// tint applied, and a blank placeholder subicon (see [`is_blank_subicon`])
-/// dropped. Each is kept premultiplied too, so the resolutions, built in
-/// parallel, share that copy instead of each making one: for a large icon,
-/// one image's worth of memory rather than one per resolution.
+/// An overlay (a subicon or the crate icon) with its color tint applied,
+/// prepared once for every icon it is drawn on: many items share one, and
+/// most icons share a size, so each size it is drawn at is resized once and
+/// remembered.
+pub struct PreparedOverlay {
+    tinted: LanczosSource,
+    resized: Mutex<HashMap<u32, Arc<RgbaImage>>>,
+}
+
+impl PreparedOverlay {
+    pub fn new(overlay: &DynamicImage) -> Self {
+        Self {
+            tinted: LanczosSource::new(tint_overlay(&overlay.to_rgba8())),
+            resized: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// `subicon` prepared, or `None` for a blank placeholder (see
+    /// [`is_blank_subicon`]), which is not drawn.
+    pub fn subicon(subicon: &DynamicImage) -> Option<Self> {
+        (!is_blank_subicon(subicon)).then(|| Self::new(subicon))
+    }
+
+    /// The tinted overlay resized to `size x size` with Pillow's LANCZOS.
+    fn resized(&self, size: u32) -> Arc<RgbaImage> {
+        let cached = self.lock_resized().get(&size).cloned();
+        cached.unwrap_or_else(|| {
+            // Resized unlocked, so other sizes resize in parallel meanwhile.
+            let resized = Arc::new(self.tinted.resize(size, size));
+            self.lock_resized().insert(size, Arc::clone(&resized));
+            resized
+        })
+    }
+
+    fn lock_resized(&self) -> std::sync::MutexGuard<'_, HashMap<u32, Arc<RgbaImage>>> {
+        self.resized.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// An item's main icon converted once for every resolution its templates are
+/// built at, with its overlays. The icon is kept premultiplied too, so the
+/// resolutions, built in parallel, share that copy instead of each making
+/// one: for a large icon, one image's worth of memory rather than one per
+/// resolution.
 pub struct PreparedIcon {
     image: LanczosSource,
-    subicon: Option<LanczosSource>,
-    crate_icon: Option<LanczosSource>,
+    subicon: Option<Arc<PreparedOverlay>>,
+    crate_icon: Option<Arc<PreparedOverlay>>,
 }
 
 impl PreparedIcon {
+    /// `subicon` is `None` for a blank placeholder too (see
+    /// [`PreparedOverlay::subicon`]).
     pub fn new(
         image: DynamicImage,
-        subicon: Option<&DynamicImage>,
-        crate_icon: Option<&DynamicImage>,
+        subicon: Option<Arc<PreparedOverlay>>,
+        crate_icon: Option<Arc<PreparedOverlay>>,
     ) -> Self {
-        let prepare_overlay =
-            |overlay: &DynamicImage| LanczosSource::new(tint_overlay(&overlay.to_rgba8()));
         Self {
             image: LanczosSource::new(image.into_rgba8()),
-            subicon: subicon
-                .filter(|subicon| !is_blank_subicon(subicon))
-                .map(prepare_overlay),
-            crate_icon: crate_icon.map(prepare_overlay),
+            subicon,
+            crate_icon,
         }
     }
 
@@ -1200,6 +1234,7 @@ mod tests {
     }
 
     mod composite_subicon_tests {
+        use super::pillow_resample::resize_lanczos_rgba;
         use super::*;
         use image::{Rgba, RgbaImage};
 
@@ -1207,10 +1242,14 @@ mod tests {
             DynamicImage::ImageRgba8(RgbaImage::from_pixel(32, 32, Rgba(color)))
         }
 
+        fn overlay(color: [u8; 4]) -> PreparedOverlay {
+            PreparedOverlay::subicon(&icon(color)).unwrap()
+        }
+
         #[test]
         fn draws_the_subicon_only_over_the_top_left_corner() {
             let base = icon([0, 0, 0, 255]);
-            let composited = composite_subicon(&base, &icon([255, 255, 255, 255]));
+            let composited = composite_subicon(&base, &overlay([255, 255, 255, 255]));
 
             // 32 * 7/16 = 14px overlay.
             assert_eq!(composited.dimensions(), (32, 32));
@@ -1222,7 +1261,7 @@ mod tests {
 
         #[test]
         fn keeps_the_icon_transparent_outside_the_subicon() {
-            let composited = composite_subicon(&icon([0, 0, 0, 0]), &icon([255, 255, 255, 255]));
+            let composited = composite_subicon(&icon([0, 0, 0, 0]), &overlay([255, 255, 255, 255]));
 
             // The subicon is drawn at 75% opacity over a transparent icon.
             assert_eq!(composited.get_pixel(0, 0)[3], 191);
@@ -1230,11 +1269,23 @@ mod tests {
         }
 
         #[test]
-        fn blank_subicon_leaves_the_icon_untouched() {
-            let base = icon([10, 20, 30, 255]);
-            let composited = composite_subicon(&base, &icon([90, 90, 90, 255]));
+        fn a_blank_subicon_is_not_prepared() {
+            assert!(PreparedOverlay::subicon(&icon([90, 90, 90, 255])).is_none());
+        }
 
-            assert_eq!(composited, base.to_rgba8());
+        #[test]
+        fn an_overlay_resizes_once_per_size() {
+            let prepared = overlay([255, 255, 255, 255]);
+            let first = prepared.resized(14);
+            assert!(Arc::ptr_eq(&first, &prepared.resized(14)));
+            assert_eq!(
+                *first,
+                resize_lanczos_rgba(
+                    &tint_overlay(&icon([255, 255, 255, 255]).to_rgba8()),
+                    14,
+                    14
+                )
+            );
         }
     }
 }

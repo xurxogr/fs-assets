@@ -22,7 +22,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use image::DynamicImage;
 use serde_json::Value;
@@ -155,26 +155,13 @@ fn decode_uasset_icon(path: &Path) -> anyhow::Result<image::DynamicImage> {
 /// (unlike an item's own main icon) don't have to exist for a template to
 /// still be built, just for that particular overlay to be skipped. A miss is
 /// cached too, so a broken overlay is only tried (and reported) once.
-fn load_optional_image<F>(
-    path: &str,
-    resolve_icon: &F,
-    cache: &mut HashMap<String, Option<Rc<image::DynamicImage>>>,
-) -> Option<Rc<image::DynamicImage>>
+fn load_optional_image<F>(path: &str, resolve_icon: &F) -> Option<DynamicImage>
 where
     F: Fn(&str) -> Option<PathBuf>,
 {
-    if let Some(cached) = cache.get(path) {
-        return cached.clone();
-    }
-    let decoded = resolve_icon(path).and_then(|resolved| match decode_icon(&resolved) {
-        Ok(img) => Some(Rc::new(img)),
-        Err(e) => {
-            log::warn!("add-mod: {e}");
-            None
-        }
-    });
-    cache.insert(path.to_string(), decoded.clone());
-    decoded
+    decode_icon(&resolve_icon(path)?)
+        .map_err(|e| log::warn!("add-mod: {e}"))
+        .ok()
 }
 
 /// Builds the [`IconTemplate`]s for every catalog item with a resolvable
@@ -207,7 +194,10 @@ where
         .map(|r| (*r, Vec::new()))
         .collect();
     let mut stats = DatabaseBuildStats::default();
-    let mut overlay_cache: HashMap<String, Option<Rc<image::DynamicImage>>> = HashMap::new();
+    // `None` for an overlay that doesn't resolve or decode, and for a blank
+    // placeholder subicon.
+    let mut subicons: HashMap<String, Option<Arc<database::PreparedOverlay>>> = HashMap::new();
+    let mut crate_icon: Option<Option<Arc<database::PreparedOverlay>>> = None;
 
     progress(0, catalog.len())?;
     for (index, entry) in catalog.iter().enumerate() {
@@ -241,25 +231,31 @@ where
             }
         };
 
-        let subicon = item
-            .subicon_path
-            .as_ref()
-            .and_then(|path| load_optional_image(path, &resolve_icon, &mut overlay_cache));
+        let subicon = item.subicon_path.as_ref().and_then(|path| {
+            subicons
+                .entry(path.clone())
+                .or_insert_with(|| {
+                    load_optional_image(path, &resolve_icon)
+                        .and_then(|subicon| database::PreparedOverlay::subicon(&subicon))
+                        .map(Arc::new)
+                })
+                .clone()
+        });
         let crate_icon = item
             .cratable
             .then(|| {
-                load_optional_image(
-                    database::CRATE_ICON_OBJECT_PATH,
-                    &resolve_icon,
-                    &mut overlay_cache,
-                )
+                crate_icon
+                    .get_or_insert_with(|| {
+                        load_optional_image(database::CRATE_ICON_OBJECT_PATH, &resolve_icon)
+                            .map(|crate_icon| Arc::new(database::PreparedOverlay::new(&crate_icon)))
+                    })
+                    .clone()
             })
             .flatten();
 
         // Each resolution resizes the icon from scratch, so they're built
         // in parallel from the one prepared copy.
-        let prepared =
-            database::PreparedIcon::new(image, subicon.as_deref(), crate_icon.as_deref());
+        let prepared = database::PreparedIcon::new(image, subicon, crate_icon);
         let built: Vec<Vec<IconTemplate>> = std::thread::scope(|scope| {
             let (prepared, item) = (&prepared, &item);
             let handles: Vec<_> = target_resolutions

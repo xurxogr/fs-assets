@@ -6,11 +6,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use image::DynamicImage;
 
 use super::{load_catalog, AssetSource, Progress, Stage};
 use crate::database::pipeline::{decode_icon, filesystem_icon_loader_with_fallback};
-use crate::database::{self, CatalogIconItem};
+use crate::database::{self, CatalogIconItem, PreparedOverlay};
 
 /// Everything one `extract-icons` run needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,7 +133,7 @@ where
 {
     std::fs::create_dir_all(output).with_context(|| format!("creating {}", output.display()))?;
     let mut stats = ExtractIconsStats::default();
-    let mut subicon_cache: HashMap<String, Option<DynamicImage>> = HashMap::new();
+    let mut subicon_cache: HashMap<String, Option<Option<PreparedOverlay>>> = HashMap::new();
     // Reported before each item rather than after, since a missing or
     // undecodable icon skips the rest of its iteration.
     for (done, item) in items.iter().enumerate() {
@@ -163,7 +162,9 @@ where
                     .entry(subicon_path.clone())
                     .or_insert_with(|| load_subicon(&resolve, subicon_path));
                 match subicon {
-                    Some(subicon) => database::composite_subicon(&icon, subicon),
+                    Some(Some(subicon)) => database::composite_subicon(&icon, subicon),
+                    // A blank placeholder: nothing to draw.
+                    Some(None) => icon.to_rgba8(),
                     None => {
                         stats.subicons_missing += 1;
                         icon.to_rgba8()
@@ -191,10 +192,16 @@ fn is_plain_file_name(name: &str) -> bool {
 
 /// Resolves and decodes a subtype icon, reporting (not failing on) a decode
 /// error: the item is still written, just without it.
-fn load_subicon(resolve: &impl Fn(&str) -> Option<PathBuf>, path: &str) -> Option<DynamicImage> {
-    decode_icon(&resolve(path)?)
+/// The subicon at `path` prepared for drawing, `Some(None)` for a blank
+/// placeholder, or `None` when it doesn't resolve or decode.
+fn load_subicon(
+    resolve: &impl Fn(&str) -> Option<PathBuf>,
+    path: &str,
+) -> Option<Option<PreparedOverlay>> {
+    let subicon = decode_icon(&resolve(path)?)
         .map_err(|e| log::warn!("extract-icons: {e}"))
-        .ok()
+        .ok()?;
+    Some(PreparedOverlay::subicon(&subicon))
 }
 
 #[cfg(test)]
