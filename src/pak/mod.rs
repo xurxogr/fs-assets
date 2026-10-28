@@ -65,7 +65,16 @@ pub fn extract_matching_with_progress<F>(
 where
     F: Fn(&str) -> bool,
 {
-    extract_matching_within(pak, keep, output_dir, progress, &mut ExtractBudget::unpak())
+    let pak_len = fs::metadata(pak)
+        .with_context(|| format!("reading the size of {}", pak.display()))?
+        .len();
+    extract_matching_within(
+        pak,
+        keep,
+        output_dir,
+        progress,
+        &mut ExtractBudget::unpak(pak_len),
+    )
 }
 
 /// How much a pak extraction may write. The compression headers come from
@@ -81,12 +90,16 @@ pub struct ExtractBudget {
 }
 
 impl ExtractBudget {
-    /// For a plain `unpak`, where the user picks what to extract: entries of
-    /// up to 4 GiB (real game entries are far smaller) and no total limit.
-    pub fn unpak() -> Self {
+    /// For a plain `unpak` of a pak `pak_len` bytes long, where the user picks
+    /// what to extract: entries of up to 4 GiB (real game entries are far
+    /// smaller), and in total 32 times the pak's size, or 16 GiB for a small
+    /// pak. Game assets inflate far less than 32 times, while a few MB of
+    /// crafted pak, many entries sharing one compressed block, could otherwise
+    /// write terabytes.
+    pub fn unpak(pak_len: u64) -> Self {
         Self {
             max_entry_bytes: 4 << 30,
-            remaining_bytes: u64::MAX,
+            remaining_bytes: pak_len.saturating_mul(32).max(16 << 30),
         }
     }
 }
@@ -185,9 +198,10 @@ impl<W: Write> Write for CappedWriter<W> {
             )));
         }
         if self.written > self.budget.remaining_bytes {
-            return Err(io::Error::other(
-                "extraction is larger than its total size limit",
-            ));
+            return Err(io::Error::other(format!(
+                "extraction is larger than its total size limit ({} bytes were left)",
+                self.budget.remaining_bytes
+            )));
         }
         self.inner.write(buf)
     }
@@ -613,6 +627,13 @@ mod tests {
         let err = extract(&pak_path, None, &out_dir).unwrap_err();
         assert!(err.to_string().contains("symlink"), "{err}");
         assert!(!outside.join("escape.txt").exists());
+    }
+
+    #[test]
+    fn unpak_caps_the_total_at_32_times_the_pak_or_16_gib() {
+        assert_eq!(ExtractBudget::unpak(1 << 20).remaining_bytes, 16 << 30);
+        assert_eq!(ExtractBudget::unpak(24 << 30).remaining_bytes, 768 << 30);
+        assert_eq!(ExtractBudget::unpak(u64::MAX).remaining_bytes, u64::MAX);
     }
 
     #[test]
