@@ -517,32 +517,28 @@ pub fn add_subtype_icon(
     if data.get("SubTypeIcon").map(is_truthy).unwrap_or(false) {
         return;
     }
+    if let Some(icon) = subtype_icon(data, code_name, ammo_dynamic_data_asset) {
+        data.insert("SubTypeIcon".to_string(), icon);
+    }
+}
 
-    let ammo_data = match data.get("AmmoDynamicData").and_then(Value::as_object) {
-        Some(m) => m.clone(),
-        None => {
-            // HARDCODED: ISGTC has no ammo info in blueprints.
-            if code_name == "ISGTC" {
-                data.insert(
-                    "SubTypeIcon".to_string(),
-                    json!(format!("{SUBTYPE_ICONS_BASE}SubtypeSEIcon.0")),
-                );
-            }
-            return;
-        }
+/// The `SubTypeIcon` [`add_subtype_icon`] adds, if any.
+fn subtype_icon(
+    data: &Map<String, Value>,
+    code_name: &str,
+    ammo_dynamic_data_asset: &Value,
+) -> Option<Value> {
+    let Some(ammo_data) = data.get("AmmoDynamicData").and_then(Value::as_object) else {
+        // HARDCODED: ISGTC has no ammo info in blueprints.
+        return (code_name == "ISGTC")
+            .then(|| json!(format!("{SUBTYPE_ICONS_BASE}SubtypeSEIcon.0")));
     };
-
-    let Some(damage_type) = ammo_data.get("DamageType").and_then(Value::as_object) else {
-        return;
-    };
-    let Some(icon) = damage_type.get("Icon").filter(|v| is_truthy(v)).cloned() else {
-        return;
-    };
-
-    let item_comp = data
-        .get("ItemComponentClass")
-        .and_then(Value::as_object)
-        .cloned();
+    let icon = ammo_data
+        .get("DamageType")?
+        .as_object()?
+        .get("Icon")
+        .filter(|v| is_truthy(v))?;
+    let item_comp = data.get("ItemComponentClass").and_then(Value::as_object);
 
     // Exclude mines - they have damage data but don't render subicons
     // in-game. Mine detection requires ItemProfileType::Tool AND one of:
@@ -552,18 +548,16 @@ pub fn add_subtype_icon(
         .get("ItemProfileType")
         .and_then(Value::as_str)
         .unwrap_or("");
-    let is_tool = profile_type.contains("Tool");
-
-    if is_tool {
-        if let Some(ic) = &item_comp {
+    let has = |ic: &Map<String, Value>, key: &str| ic.get(key).map(is_truthy).unwrap_or(false);
+    if profile_type.contains("Tool") {
+        if let Some(ic) = item_comp {
             let is_auto_activate = ic.get("bAutoActivate") == Some(&Value::Bool(true));
-            let has_deploy_code = ic.get("DeployCodeName").map(is_truthy).unwrap_or(false);
-            let has_explosive_class = ic.get("ExplosiveClass").map(is_truthy).unwrap_or(false);
-            let has_projectile_class = ic.get("ProjectileClass").map(is_truthy).unwrap_or(false);
             let is_mine = is_auto_activate
-                || (!has_deploy_code && !has_explosive_class && !has_projectile_class);
+                || (!has(ic, "DeployCodeName")
+                    && !has(ic, "ExplosiveClass")
+                    && !has(ic, "ProjectileClass"));
             if is_mine {
-                return;
+                return None;
             }
         }
     }
@@ -572,28 +566,18 @@ pub fn add_subtype_icon(
     if !code_name.is_empty()
         && data_table_lookup::get_ammo_dynamic_data(ammo_dynamic_data_asset, code_name).is_some()
     {
-        data.insert("SubTypeIcon".to_string(), icon);
-        return;
+        return Some(icon.clone());
     }
 
-    if let Some(ic) = &item_comp {
-        // Case 3b: ProjectileClass.ExplosiveCodeName (single-use/rocket).
-        if let Some(proj_class) = ic.get("ProjectileClass").and_then(Value::as_object) {
-            if proj_class
-                .get("ExplosiveCodeName")
-                .map(is_truthy)
-                .unwrap_or(false)
-            {
-                data.insert("SubTypeIcon".to_string(), icon);
-                return;
-            }
-        }
-        // Case 3c: DeployCodeName (deployable tripod weapons).
-        if ic.get("DeployCodeName").map(is_truthy).unwrap_or(false) {
-            data.insert("SubTypeIcon".to_string(), icon);
-        }
-    }
+    let ic = item_comp?;
+    // Case 3b: ProjectileClass.ExplosiveCodeName (single-use/rocket).
+    let explosive_projectile = ic
+        .get("ProjectileClass")
+        .and_then(Value::as_object)
+        .is_some_and(|proj_class| has(proj_class, "ExplosiveCodeName"));
+    // Case 3c: DeployCodeName (deployable tripod weapons).
     // Otherwise: ammo comes from MultiAmmo/CompatibleAmmoCodeName - no SubTypeIcon.
+    (explosive_projectile || has(ic, "DeployCodeName")).then(|| icon.clone())
 }
 
 // ---------------------------------------------------------------------
@@ -685,9 +669,7 @@ fn add_ammo_and_damage_type(
     ammo_asset: &Value,
     ctx: &AssemblerContext,
 ) {
-    let Some(ammo_code) =
-        damage_type_resolver::get_ammo_code(&Value::Object(data.clone()), ammo_asset)
-    else {
+    let Some(ammo_code) = damage_type_resolver::get_ammo_code(data, ammo_asset) else {
         return;
     };
 

@@ -40,7 +40,7 @@ use crate::catalog::utils::{
 /// 2. A single-entry `MultiAmmo` list.
 /// 3. `CompatibleAmmoCodeName`.
 /// 4. `ProjectileClass.ExplosiveCodeName`.
-pub fn get_ammo_code(data: &Value, ammo_dynamic_data_asset: &Value) -> Option<String> {
+pub fn get_ammo_code(data: &Map<String, Value>, ammo_dynamic_data_asset: &Value) -> Option<String> {
     let code_name = data.get("CodeName").and_then(Value::as_str).unwrap_or("");
 
     // Case 1: Item itself is ammo (has AmmoDynamicData entry).
@@ -333,19 +333,23 @@ mod tests {
     mod get_ammo_code_tests {
         use super::*;
 
+        fn ammo_code(data: &Value, ammo: &Value) -> Option<String> {
+            get_ammo_code(data.as_object().unwrap(), ammo)
+        }
+
         #[test]
         fn item_itself_is_ammo() {
             let ammo = ammo_asset(json!({"RifleAmmo": {"Damage": 5}}));
             let data = json!({"CodeName": "RifleAmmo"});
-            assert_eq!(get_ammo_code(&data, &ammo), Some("RifleAmmo".to_string()));
+            assert_eq!(ammo_code(&data, &ammo), Some("RifleAmmo".to_string()));
         }
 
         #[test]
         fn no_item_component_class_returns_none() {
             let ammo = ammo_asset(json!({}));
-            assert_eq!(get_ammo_code(&json!({"CodeName": "Foo"}), &ammo), None);
+            assert_eq!(ammo_code(&json!({"CodeName": "Foo"}), &ammo), None);
             assert_eq!(
-                get_ammo_code(
+                ammo_code(
                     &json!({"CodeName": "Foo", "ItemComponentClass": "not-a-dict"}),
                     &ammo
                 ),
@@ -358,7 +362,7 @@ mod tests {
             let ammo = ammo_asset(json!({}));
             let data =
                 json!({"CodeName": "Weapon", "ItemComponentClass": {"MultiAmmo": ["RifleAmmo"]}});
-            assert_eq!(get_ammo_code(&data, &ammo), Some("RifleAmmo".to_string()));
+            assert_eq!(ammo_code(&data, &ammo), Some("RifleAmmo".to_string()));
         }
 
         #[test]
@@ -368,7 +372,7 @@ mod tests {
                 "CodeName": "Weapon",
                 "ItemComponentClass": {"MultiAmmo": ["A", "B"]},
             });
-            assert_eq!(get_ammo_code(&data, &ammo), None);
+            assert_eq!(ammo_code(&data, &ammo), None);
         }
 
         #[test]
@@ -378,7 +382,7 @@ mod tests {
                 "CodeName": "Weapon",
                 "ItemComponentClass": {"CompatibleAmmoCodeName": "RifleAmmo"},
             });
-            assert_eq!(get_ammo_code(&data, &ammo), Some("RifleAmmo".to_string()));
+            assert_eq!(ammo_code(&data, &ammo), Some("RifleAmmo".to_string()));
         }
 
         #[test]
@@ -388,10 +392,7 @@ mod tests {
                 "CodeName": "Weapon",
                 "ItemComponentClass": {"ProjectileClass": {"ExplosiveCodeName": "RPGExplosive"}},
             });
-            assert_eq!(
-                get_ammo_code(&data, &ammo),
-                Some("RPGExplosive".to_string())
-            );
+            assert_eq!(ammo_code(&data, &ammo), Some("RPGExplosive".to_string()));
         }
 
         #[test]
@@ -401,14 +402,14 @@ mod tests {
                 "CodeName": "Weapon",
                 "ItemComponentClass": {"ProjectileClass": {"Speed": 500}},
             });
-            assert_eq!(get_ammo_code(&data, &ammo), None);
+            assert_eq!(ammo_code(&data, &ammo), None);
         }
 
         #[test]
         fn no_matching_case_returns_none() {
             let ammo = ammo_asset(json!({}));
             let data = json!({"CodeName": "Weapon", "ItemComponentClass": {"SomethingElse": true}});
-            assert_eq!(get_ammo_code(&data, &ammo), None);
+            assert_eq!(ammo_code(&data, &ammo), None);
         }
 
         #[test]
@@ -418,7 +419,7 @@ mod tests {
                 "CodeName": "Weapon",
                 "ItemComponentClass": {"CompatibleAmmoCodeName": ""},
             });
-            assert_eq!(get_ammo_code(&data, &ammo), None);
+            assert_eq!(ammo_code(&data, &ammo), None);
         }
     }
 
