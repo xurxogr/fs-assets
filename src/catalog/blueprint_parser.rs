@@ -122,6 +122,13 @@ impl<'a> Blueprints<'a> {
         if let Some(extracted) = self.extracted.borrow().get(object_path) {
             return extracted.clone();
         }
+        // `visited` holds the chain walked so far: stop on a cycle, and on a
+        // chain long enough to exhaust the stack (each level recurses back
+        // into here). What is cut short here isn't remembered: reached
+        // another way, the blueprint may well extract whole.
+        if visited.len() >= MAX_PARENT_DEPTH || visited.contains(object_path) {
+            return None;
+        }
         let extracted = (self.loader)(object_path).and_then(|asset| {
             match self.extract_impl(object_path, &asset, visited)? {
                 Value::Object(map) => Some(map),
@@ -140,11 +147,10 @@ impl<'a> Blueprints<'a> {
         asset: &Value,
         visited: &mut HashSet<String>,
     ) -> Option<Value> {
-        // `visited` holds the chain walked so far: stop on a cycle, and on a chain
-        // long enough to exhaust the stack (each level recurses back into here).
-        if visited.len() >= MAX_PARENT_DEPTH || !visited.insert(object_path.to_string()) {
-            return None;
-        }
+        // In the `/Game/` form parent paths take, so a root blueprint, whose
+        // path is `War/Content/...`, naming itself as its parent is caught
+        // before it is loaded again.
+        visited.insert(game_object_path(object_path));
 
         let exports = asset.get("exports").and_then(Value::as_array)?;
         let empty_imports = Vec::new();
@@ -209,6 +215,15 @@ impl<'a> Blueprints<'a> {
         }
 
         Some(Value::Object(catalog_data))
+    }
+}
+
+/// `object_path` in `/Game/...` form: a `War/Content/...` path (see
+/// [`compute_object_path`]) is the same object.
+fn game_object_path(object_path: &str) -> String {
+    match object_path.strip_prefix("War/Content/") {
+        Some(rest) => format!("/Game/{rest}"),
+        None => object_path.to_string(),
     }
 }
 
@@ -837,6 +852,67 @@ mod tests {
             let last = MAX_PARENT_DEPTH - 1;
             assert_eq!(result[format!("Level{last}")], json!(last));
             assert!(result.get(format!("Level{MAX_PARENT_DEPTH}")).is_none());
+        }
+
+        /// `BPSelf` at `War/Content/Blueprints/Items/BPSelf` naming itself as
+        /// its parent, by its `/Game/` path.
+        #[test]
+        fn a_root_blueprint_that_is_its_own_parent_is_not_loaded_again() {
+            let mut asset = chained_asset(0);
+            asset["imports"][0]["object_name"] = json!("BPSelf_C");
+            asset["imports"][1]["object_name"] = json!("/Game/Blueprints/Items/BPSelf");
+            let calls = std::cell::Cell::new(0);
+            let loader = |_: &str| {
+                calls.set(calls.get() + 1);
+                None
+            };
+
+            let result = Blueprints::new(&loader, false)
+                .extract("War/Content/Blueprints/Items/BPSelf", &asset)
+                .unwrap();
+
+            assert_eq!(calls.get(), 0);
+            assert_eq!(result["Level0"], json!(0));
+        }
+
+        /// `BPA` and `BPB` are each other's parent. Extracting `BPA` cuts
+        /// the cycle at the second `BPA`; that cut isn't remembered, so `BPA`
+        /// reached afterwards by path still extracts.
+        #[test]
+        fn a_blueprint_cut_short_by_a_cycle_still_extracts_by_path() {
+            let named = |name: &str, parent: &str| {
+                let mut asset = chained_asset(0);
+                asset["imports"][0]["object_name"] = json!(format!("{parent}_C"));
+                asset["imports"][1]["object_name"] =
+                    json!(format!("/Game/Blueprints/Items/{parent}"));
+                asset["exports"][1]["properties"] = json!({ name: true });
+                asset
+            };
+            let assets: HashMap<String, Value> = [("BPA", "BPB"), ("BPB", "BPA")]
+                .into_iter()
+                .map(|(name, parent)| {
+                    (
+                        format!("/Game/Blueprints/Items/{name}"),
+                        named(name, parent),
+                    )
+                })
+                .collect();
+            let root = assets["/Game/Blueprints/Items/BPA"].clone();
+            let loader = map_loader(assets);
+            let blueprints = Blueprints::new(&loader, false);
+
+            let a = blueprints
+                .extract("/Game/Blueprints/Items/BPA", &root)
+                .unwrap();
+            assert_eq!(
+                (a["BPA"].clone(), a["BPB"].clone()),
+                (json!(true), json!(true))
+            );
+
+            let a = blueprints
+                .extract_path("/Game/Blueprints/Items/BPA")
+                .unwrap();
+            assert_eq!(a.get("BPA"), Some(&json!(true)));
         }
 
         #[test]
