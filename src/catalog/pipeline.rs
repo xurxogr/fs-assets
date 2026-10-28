@@ -12,13 +12,11 @@
 //! under `Content` — consistent with
 //! `data_table_lookup::table_object_path` (`"War/Content/Blueprints/Data/{table_name}"`).
 
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::catalog::blueprint_parser::{self, filesystem_loader};
+use crate::catalog::blueprint_parser::{self, filesystem_loader, Blueprints};
 use crate::catalog::catalog_assembler::{self, AssemblerContext, DataTables};
 use crate::catalog::data_table_lookup::{
     self, filesystem_blueprint_loader, filesystem_data_loader,
@@ -77,26 +75,18 @@ pub fn collect_blueprint_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     Ok(results)
 }
 
-/// `raw` with every result remembered by object path, failures included. A
-/// load that panics (a malformed asset the parser chokes on) is reported and
-/// remembered as missing, like one that fails to parse: otherwise the panic
-/// would skip the cache, and every blueprint with that ancestor would parse
-/// it, and panic, again.
-fn cached_loader(raw: impl Fn(&str) -> Option<Value>) -> impl Fn(&str) -> Option<Value> {
-    let cache: RefCell<HashMap<String, Option<Value>>> = RefCell::new(HashMap::new());
+/// `raw` with a load that panics (a malformed asset the parser chokes on)
+/// reported and treated as missing, like one that fails to parse, so
+/// [`Blueprints`] remembers it as such: otherwise the panic would skip that,
+/// and every blueprint with that ancestor would parse it, and panic, again.
+fn catching_loader(raw: impl Fn(&str) -> Option<Value>) -> impl Fn(&str) -> Option<Value> {
     move |object_path: &str| {
-        if let Some(cached) = cache.borrow().get(object_path) {
-            return cached.clone();
-        }
-        let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| raw(object_path)))
-            .unwrap_or_else(|_| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| raw(object_path))).unwrap_or_else(
+            |_| {
                 log::warn!("build-catalog: panicked while parsing {object_path}");
                 None
-            });
-        cache
-            .borrow_mut()
-            .insert(object_path.to_string(), loaded.clone());
-        loaded
+            },
+        )
     }
 }
 
@@ -279,19 +269,14 @@ pub fn build_catalog_from_extract_dir_with_progress(
         mass_production_asset.as_ref(),
     );
 
-    // `blueprint_parser::AssetLoader`'s doc comment is explicit that this
-    // module keeps no cross-call cache and that memoizing
-    // repeated loads across a whole catalog build is the caller's
-    // responsibility. Without this, every blueprint that walks its parent
-    // chain re-reads and re-parses shared ancestors (e.g. a common base
-    // item) from scratch via `uasset_to_full_json` once per descendant,
-    // which is quadratic-ish in practice and was measured to turn a ~5
-    // minute build into 56+ minutes over the real ~24k-file corpus.
-    let blueprint_loader = cached_loader(filesystem_loader(&blueprints_dir));
-
+    // One `Blueprints` for the whole build, so each shared ancestor (e.g. a
+    // common base item) is parsed and extracted once rather than once per
+    // descendant: without that, the build was measured to go from ~5 to 56+
+    // minutes over the real ~24k-file corpus.
+    let blueprint_loader = catching_loader(filesystem_loader(&blueprints_dir));
+    let blueprints = Blueprints::new(&blueprint_loader, true);
     let ctx = AssemblerContext {
-        full_extraction: true,
-        blueprint_loader: &blueprint_loader,
+        blueprints: &blueprints,
         tables,
         production_categories: &production_categories,
         loc_service: &loc_service,
@@ -365,15 +350,16 @@ pub fn build_catalog_from_extract_dir_with_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
 
-    mod cached_loader_tests {
+    mod catching_loader_tests {
         use super::*;
         use std::cell::Cell;
 
         #[test]
-        fn loads_each_path_once_failures_and_panics_included() {
+        fn blueprints_load_each_path_once_failures_and_panics_included() {
             let calls = Cell::new(0);
-            let loader = cached_loader(|path: &str| {
+            let loader = catching_loader(|path: &str| {
                 calls.set(calls.get() + 1);
                 match path {
                     "/Game/Blueprints/Ok" => Some(serde_json::json!({"ok": true})),
@@ -382,13 +368,19 @@ mod tests {
                 }
             });
 
+            assert_eq!(
+                loader("/Game/Blueprints/Ok"),
+                Some(serde_json::json!({"ok": true}))
+            );
+            assert_eq!(loader("/Game/Blueprints/Panics"), None);
+
+            calls.set(0);
+            let blueprints = Blueprints::new(&loader, true);
             for _ in 0..3 {
-                assert_eq!(
-                    loader("/Game/Blueprints/Ok"),
-                    Some(serde_json::json!({"ok": true}))
-                );
-                assert_eq!(loader("/Game/Blueprints/Missing"), None);
-                assert_eq!(loader("/Game/Blueprints/Panics"), None);
+                // No `Default__` export, so nothing to extract.
+                assert_eq!(blueprints.extract_path("/Game/Blueprints/Ok"), None);
+                assert_eq!(blueprints.extract_path("/Game/Blueprints/Missing"), None);
+                assert_eq!(blueprints.extract_path("/Game/Blueprints/Panics"), None);
             }
             assert_eq!(calls.get(), 3);
         }

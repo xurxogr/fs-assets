@@ -15,16 +15,15 @@
 //! assembler object owning parsers, caches or running stats. Preloaded
 //! data-table assets are passed
 //! in via [`DataTables`]/[`AssemblerContext`] instead of being lazily loaded
-//! and cached by a long-lived service object; memoizing repeated loads across
-//! a whole catalog build is the caller's responsibility (e.g. by giving the
-//! `blueprint_loader` closure its own cache), exactly as documented on
-//! `blueprint_parser::AssetLoader` and in `data_table_lookup`'s module docs.
+//! and cached by a long-lived service object. The referenced blueprints are
+//! loaded through one [`Blueprints`], which extracts each once for the whole
+//! catalog build.
 
 use std::collections::HashMap;
 
 use serde_json::{json, Map, Value};
 
-use crate::catalog::blueprint_parser::{self, AssetLoader};
+use crate::catalog::blueprint_parser::Blueprints;
 use crate::catalog::damage_type_resolver;
 use crate::catalog::data_table_lookup;
 use crate::catalog::localization::{self, LocalizationLookup};
@@ -60,11 +59,9 @@ pub struct DataTables<'a> {
 /// Everything [`assemble_catalog_entry`] needs beyond the blueprint asset
 /// itself: the data tables, the merged production-categories map (see
 /// `data_table_lookup::load_production_categories`), the localization
-/// service, the blueprint loader closure, and the `full_extraction` flag
-/// forwarded to `blueprint_parser`/`damage_type_resolver`.
+/// service, and the referenced blueprints.
 pub struct AssemblerContext<'a> {
-    pub full_extraction: bool,
-    pub blueprint_loader: &'a AssetLoader<'a>,
+    pub blueprints: &'a Blueprints<'a>,
     pub tables: DataTables<'a>,
     pub production_categories: &'a HashMap<String, HashMap<String, String>>,
     pub loc_service: &'a LocalizationLookup,
@@ -239,8 +236,7 @@ pub fn expand_data(
     data: &mut Map<String, Value>,
     code_name: &str,
     tables: &DataTables,
-    full_extraction: bool,
-    blueprint_loader: &AssetLoader,
+    blueprints: &Blueprints,
 ) {
     if code_name.is_empty() {
         return;
@@ -345,22 +341,16 @@ pub fn expand_data(
         }
     }
 
-    enrich_item_component_class(data, full_extraction, blueprint_loader);
+    enrich_item_component_class(data, blueprints);
 }
 
 /// Enrich `ItemComponentClass` with all properties from the referenced
 /// component sub-blueprint (in-place), including resolving `ProjectileClass`
 /// for single-ammo weapons.
 ///
-/// No defensive deep-copy is needed here before
-/// merging: `blueprint_parser::extract_catalog_data` builds a fresh `Value`
-/// tree on every call rather than returning a reference into a persistent
-/// cache, so there is no cached object for a later mutation to alias.
-pub fn enrich_item_component_class(
-    data: &mut Map<String, Value>,
-    full_extraction: bool,
-    blueprint_loader: &AssetLoader,
-) {
+/// [`Blueprints::extract_path`] returns its own copy of what it remembers, so
+/// merging it in can't alter what later lookups get.
+pub fn enrich_item_component_class(data: &mut Map<String, Value>, blueprints: &Blueprints) {
     let Some(item_comp_raw) = data.get("ItemComponentClass").cloned() else {
         return;
     };
@@ -398,19 +388,10 @@ pub fn enrich_item_component_class(
     };
 
     let object_path = format!("/Game/Blueprints/{relative_path}");
-    let Some(comp_asset) = blueprint_loader(&object_path) else {
+    let Some(comp_data) = blueprints.extract_path(&object_path) else {
         // Parser couldn't load the component blueprint: still write back the
         // normalized (string -> dict) shape so consumers always see a
         // dict, even when the component couldn't be parsed.
-        data.insert("ItemComponentClass".to_string(), Value::Object(item_comp));
-        return;
-    };
-    let Some(Value::Object(comp_data)) = blueprint_parser::extract_catalog_data(
-        &object_path,
-        &comp_asset,
-        full_extraction,
-        blueprint_loader,
-    ) else {
         data.insert("ItemComponentClass".to_string(), Value::Object(item_comp));
         return;
     };
@@ -456,24 +437,14 @@ pub fn enrich_item_component_class(
                             .strip_prefix("/Game/Blueprints/")
                             .unwrap_or(first_proj)
                     );
-                    if let Some(proj_asset) = blueprint_loader(&proj_object_path) {
-                        if let Some(Value::Object(proj_data)) =
-                            blueprint_parser::extract_catalog_data(
-                                &proj_object_path,
-                                &proj_asset,
-                                full_extraction,
-                                blueprint_loader,
-                            )
-                        {
-                            let mut proj_class = Map::new();
-                            for (k, v) in proj_data {
-                                if k != "ObjectPath" {
-                                    proj_class.insert(k, v);
-                                }
+                    if let Some(proj_data) = blueprints.extract_path(&proj_object_path) {
+                        let mut proj_class = Map::new();
+                        for (k, v) in proj_data {
+                            if k != "ObjectPath" {
+                                proj_class.insert(k, v);
                             }
-                            item_comp
-                                .insert("ProjectileClass".to_string(), Value::Object(proj_class));
                         }
+                        item_comp.insert("ProjectileClass".to_string(), Value::Object(proj_class));
                     }
                 }
             }
@@ -583,8 +554,7 @@ pub fn add_subtype_icon(
 
 /// Build a complete catalog entry from an already-parsed blueprint asset.
 ///
-/// Extracts blueprint data (via
-/// [`blueprint_parser::extract_catalog_data`]), resolves localization GUIDs,
+/// Extracts blueprint data (via [`Blueprints::extract`]), resolves localization GUIDs,
 /// expands with data tables and referenced blueprints (via [`expand_data`]),
 /// adds/resolves `AmmoDynamicData`+`DamageType` (via
 /// `damage_type_resolver::get_ammo_code`/`resolve_damage_type`), adds
@@ -592,7 +562,7 @@ pub fn add_subtype_icon(
 /// the stockpile rules (`StockpileCategory`, `bIsStockpilable`,
 /// `bIsCratable`, via [`stockpile_classifier::classify`]).
 ///
-/// Returns `None` if `blueprint_parser::extract_catalog_data` can't extract
+/// Returns `None` if [`Blueprints::extract`] can't extract
 /// anything, or
 /// if `object_path` is not under a stockpile source directory
 /// (`ItemPickups`/`Vehicles`/`Structures`).
@@ -602,12 +572,7 @@ pub fn assemble_catalog_entry(
     ctx: &AssemblerContext,
 ) -> Option<Value> {
     let category = StockpileCategory::from_object_path(object_path)?;
-    let cached = blueprint_parser::extract_catalog_data(
-        object_path,
-        asset,
-        ctx.full_extraction,
-        ctx.blueprint_loader,
-    )?;
+    let cached = ctx.blueprints.extract(object_path, asset)?;
     let Value::Object(mut data) = cached else {
         return None;
     };
@@ -647,13 +612,7 @@ pub fn assemble_catalog_entry(
     }
 
     // Expand with data tables and referenced blueprints.
-    expand_data(
-        &mut data,
-        &code_name,
-        &ctx.tables,
-        ctx.full_extraction,
-        ctx.blueprint_loader,
-    );
+    expand_data(&mut data, &code_name, &ctx.tables, ctx.blueprints);
 
     // Add AmmoDynamicData and resolve DamageType.
     let empty_ammo_asset = json!({"imports": [], "exports": []});
@@ -683,8 +642,7 @@ pub fn assemble_catalog_entry(
             if let Some(damage_type) = damage_type_resolver::resolve_damage_type(
                 ammo_code,
                 ammo_asset,
-                ctx.full_extraction,
-                ctx.blueprint_loader,
+                ctx.blueprints,
                 ctx.loc_service,
             ) {
                 if let Some(Value::Object(ammo_map)) = data.get_mut("AmmoDynamicData") {
@@ -766,13 +724,12 @@ mod tests {
     }
 
     fn empty_ctx<'a>(
-        loader: &'a AssetLoader<'a>,
+        blueprints: &'a Blueprints<'a>,
         loc: &'a LocalizationLookup,
         prod_cats: &'a HashMap<String, HashMap<String, String>>,
     ) -> AssemblerContext<'a> {
         AssemblerContext {
-            full_extraction: false,
-            blueprint_loader: loader,
+            blueprints,
             tables: DataTables::default(),
             production_categories: prod_cats,
             loc_service: loc,
@@ -1054,7 +1011,12 @@ mod tests {
                 ..Default::default()
             };
             let mut data = Map::new();
-            expand_data(&mut data, "TestItem", &tables, false, &no_loader);
+            expand_data(
+                &mut data,
+                "TestItem",
+                &tables,
+                &Blueprints::new(&no_loader, false),
+            );
             assert!(data.contains_key("ItemDynamicData"));
         }
 
@@ -1073,7 +1035,12 @@ mod tests {
                 ..Default::default()
             };
             let mut data = Map::new();
-            expand_data(&mut data, "TestAmmo", &tables, false, &no_loader);
+            expand_data(
+                &mut data,
+                "TestAmmo",
+                &tables,
+                &Blueprints::new(&no_loader, false),
+            );
             assert_eq!(data["AmmoDynamicData"]["Damage"], json!(100));
         }
 
@@ -1096,14 +1063,24 @@ mod tests {
                 "ItemProfileType".to_string(),
                 json!("EItemProfileType::Small"),
             );
-            expand_data(&mut data, "TestItem", &tables, false, &no_loader);
+            expand_data(
+                &mut data,
+                "TestItem",
+                &tables,
+                &Blueprints::new(&no_loader, false),
+            );
             assert!(data.contains_key("ItemProfileData"));
         }
 
         #[test]
         fn skips_empty_codename() {
             let mut data = Map::new();
-            expand_data(&mut data, "", &DataTables::default(), false, &no_loader);
+            expand_data(
+                &mut data,
+                "",
+                &DataTables::default(),
+                &Blueprints::new(&no_loader, false),
+            );
             assert!(data.is_empty());
         }
 
@@ -1144,7 +1121,7 @@ mod tests {
                 "ItemComponentClass".to_string(),
                 json!("/Game/Blueprints/Items/BPRifleComponent"),
             );
-            enrich_item_component_class(&mut data, false, &loader);
+            enrich_item_component_class(&mut data, &Blueprints::new(&loader, false));
 
             assert!(data["ItemComponentClass"].is_object());
             assert_eq!(
@@ -1165,7 +1142,7 @@ mod tests {
                 "ItemComponentClass".to_string(),
                 json!({"ObjectPath": "War/Content/Blueprints/Items/BPComp.0"}),
             );
-            enrich_item_component_class(&mut data, false, &loader);
+            enrich_item_component_class(&mut data, &Blueprints::new(&loader, false));
             assert_eq!(data["ItemComponentClass"]["Damage"], json!(25));
         }
 
@@ -1181,7 +1158,7 @@ mod tests {
                 "ItemComponentClass".to_string(),
                 json!({"ObjectPath": "War/Content/Blueprints/Items/BPComp.0Mk2.0"}),
             );
-            enrich_item_component_class(&mut data, false, &loader);
+            enrich_item_component_class(&mut data, &Blueprints::new(&loader, false));
             assert_eq!(data["ItemComponentClass"]["Damage"], json!(25));
         }
 
@@ -1192,7 +1169,7 @@ mod tests {
                 "ItemComponentClass".to_string(),
                 json!({"SomeOther": "value"}),
             );
-            enrich_item_component_class(&mut data, false, &no_loader);
+            enrich_item_component_class(&mut data, &Blueprints::new(&no_loader, false));
             assert_eq!(data["ItemComponentClass"], json!({"SomeOther": "value"}));
         }
 
@@ -1200,14 +1177,14 @@ mod tests {
         fn invalid_type_is_left_unmodified() {
             let mut data = Map::new();
             data.insert("ItemComponentClass".to_string(), json!(123));
-            enrich_item_component_class(&mut data, false, &no_loader);
+            enrich_item_component_class(&mut data, &Blueprints::new(&no_loader, false));
             assert_eq!(data["ItemComponentClass"], json!(123));
         }
 
         #[test]
         fn missing_field_adds_nothing() {
             let mut data = Map::new();
-            enrich_item_component_class(&mut data, false, &no_loader);
+            enrich_item_component_class(&mut data, &Blueprints::new(&no_loader, false));
             assert!(!data.contains_key("ItemComponentClass"));
         }
 
@@ -1224,7 +1201,7 @@ mod tests {
                 "ItemComponentClass".to_string(),
                 json!("/Game/Blueprints/Items/BPComp"),
             );
-            enrich_item_component_class(&mut data, false, &loader);
+            enrich_item_component_class(&mut data, &Blueprints::new(&loader, false));
             assert_eq!(
                 data["ItemComponentClass"]["MultiAmmo"],
                 json!(["Ammo1", "Ammo2", "Ammo3"])
@@ -1245,7 +1222,7 @@ mod tests {
                 "ItemComponentClass".to_string(),
                 json!("/Game/Blueprints/Items/BPComp"),
             );
-            enrich_item_component_class(&mut data, false, &loader);
+            enrich_item_component_class(&mut data, &Blueprints::new(&loader, false));
             assert_eq!(
                 data["ItemComponentClass"]["MultiAmmo"],
                 json!(["Ammo1", "Ammo2"])
@@ -1273,7 +1250,7 @@ mod tests {
                 "ItemComponentClass".to_string(),
                 json!("/Game/Blueprints/Items/BPComp"),
             );
-            enrich_item_component_class(&mut data, false, &loader);
+            enrich_item_component_class(&mut data, &Blueprints::new(&loader, false));
 
             let proj_class = &data["ItemComponentClass"]["ProjectileClass"];
             assert_eq!(proj_class["ExplosiveCodeName"], json!("RPGExplosive"));
@@ -1301,7 +1278,7 @@ mod tests {
                 "ItemComponentClass".to_string(),
                 json!("/Game/Blueprints/Items/BPComp"),
             );
-            enrich_item_component_class(&mut data, false, &loader);
+            enrich_item_component_class(&mut data, &Blueprints::new(&loader, false));
             assert!(data["ItemComponentClass"].get("ProjectileClass").is_none());
         }
     }
@@ -1441,7 +1418,8 @@ mod tests {
             }));
             let loc = temp_loc_service();
             let prod_cats = HashMap::new();
-            let ctx = empty_ctx(&no_loader, &loc, &prod_cats);
+            let blueprints = Blueprints::new(&no_loader, false);
+            let ctx = empty_ctx(&blueprints, &loc, &prod_cats);
 
             let result =
                 assemble_catalog_entry("/Game/Blueprints/Items/BPTest", &asset, &ctx).unwrap();
@@ -1461,7 +1439,8 @@ mod tests {
             }));
             let loc = temp_loc_service();
             let prod_cats = HashMap::new();
-            let ctx = empty_ctx(&no_loader, &loc, &prod_cats);
+            let blueprints = Blueprints::new(&no_loader, false);
+            let ctx = empty_ctx(&blueprints, &loc, &prod_cats);
 
             let result =
                 assemble_catalog_entry("/Game/Blueprints/Items/BPTest", &asset, &ctx).unwrap();
@@ -1481,7 +1460,8 @@ mod tests {
             }));
             let loc = temp_loc_service();
             let prod_cats = HashMap::new();
-            let ctx = empty_ctx(&no_loader, &loc, &prod_cats);
+            let blueprints = Blueprints::new(&no_loader, false);
+            let ctx = empty_ctx(&blueprints, &loc, &prod_cats);
 
             let result =
                 assemble_catalog_entry("/Game/Blueprints/ItemPickups/BPTest", &asset, &ctx)
@@ -1501,7 +1481,8 @@ mod tests {
             }));
             let loc = temp_loc_service();
             let prod_cats = HashMap::new();
-            let ctx = empty_ctx(&no_loader, &loc, &prod_cats);
+            let blueprints = Blueprints::new(&no_loader, false);
+            let ctx = empty_ctx(&blueprints, &loc, &prod_cats);
 
             let result =
                 assemble_catalog_entry("/Game/Blueprints/Vehicles/BPTest", &asset, &ctx).unwrap();
@@ -1521,7 +1502,8 @@ mod tests {
             }));
             let loc = temp_loc_service();
             let prod_cats = HashMap::new();
-            let ctx = empty_ctx(&no_loader, &loc, &prod_cats);
+            let blueprints = Blueprints::new(&no_loader, false);
+            let ctx = empty_ctx(&blueprints, &loc, &prod_cats);
 
             let result =
                 assemble_catalog_entry("/Game/Blueprints/Structures/BPTest", &asset, &ctx).unwrap();
@@ -1537,7 +1519,8 @@ mod tests {
             );
             let loc = temp_loc_service();
             let prod_cats = HashMap::new();
-            let ctx = empty_ctx(&no_loader, &loc, &prod_cats);
+            let blueprints = Blueprints::new(&no_loader, false);
+            let ctx = empty_ctx(&blueprints, &loc, &prod_cats);
             assert_eq!(
                 assemble_catalog_entry("/Game/Blueprints/Data/BPTest", &asset, &ctx),
                 None
@@ -1560,7 +1543,8 @@ mod tests {
                 "EFactoryQueueType::Weapons".to_string(),
             );
             prod_cats.insert("riflew".to_string(), entry);
-            let ctx = empty_ctx(&no_loader, &loc, &prod_cats);
+            let blueprints = Blueprints::new(&no_loader, false);
+            let ctx = empty_ctx(&blueprints, &loc, &prod_cats);
 
             let result =
                 assemble_catalog_entry("/Game/Blueprints/Items/BPTest", &asset, &ctx).unwrap();
@@ -1601,9 +1585,9 @@ mod tests {
                 ammo_dynamic_data: Some(&ammo_asset),
                 ..Default::default()
             };
+            let blueprints = Blueprints::new(&no_loader, false);
             let ctx = AssemblerContext {
-                full_extraction: false,
-                blueprint_loader: &no_loader,
+                blueprints: &blueprints,
                 tables,
                 production_categories: &prod_cats,
                 loc_service: &loc,
@@ -1624,7 +1608,8 @@ mod tests {
             });
             let loc = temp_loc_service();
             let prod_cats = HashMap::new();
-            let ctx = empty_ctx(&no_loader, &loc, &prod_cats);
+            let blueprints = Blueprints::new(&no_loader, false);
+            let ctx = empty_ctx(&blueprints, &loc, &prod_cats);
             assert_eq!(
                 assemble_catalog_entry("/Game/Blueprints/Items/BPTest", &asset, &ctx),
                 None

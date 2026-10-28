@@ -13,15 +13,13 @@
 //! - [`get_ammo_code`] takes the loaded `BPAmmoDynamicData` asset explicitly
 //!   and delegates to
 //!   [`crate::catalog::data_table_lookup::get_ammo_dynamic_data`].
-//! - [`resolve_damage_type`] takes a
-//!   [`crate::catalog::blueprint_parser::AssetLoader`] closure (same pattern
-//!   as `blueprint_parser::extract_catalog_data`) and passes the resolved
-//!   `/Game/Blueprints/...` object path straight to
-//!   `blueprint_parser::extract_catalog_data`.
+//! - [`resolve_damage_type`] passes the resolved `/Game/Blueprints/...`
+//!   object path straight to
+//!   [`crate::catalog::blueprint_parser::Blueprints::extract_path`].
 
 use serde_json::{json, Map, Value};
 
-use crate::catalog::blueprint_parser::{self, AssetLoader};
+use crate::catalog::blueprint_parser::Blueprints;
 use crate::catalog::data_table_lookup;
 use crate::catalog::localization::{self, LocalizationLookup};
 use crate::catalog::utils::{
@@ -255,11 +253,9 @@ pub fn build_damage_type_result(
 /// `ammo_asset` is the already-loaded `BPAmmoDynamicData` asset used both to
 /// resolve the `DamageType` import (via
 /// [`data_table_lookup::resolve_damage_type_import`]) and — like that
-/// function — as the source of `imports` for resolution. `full_extraction`
-/// is forwarded to `blueprint_parser::extract_catalog_data` (see that
-/// function's docs for what it controls). `blueprint_loader` loads a
-/// `DamageType` blueprint asset given its `/Game/Blueprints/...` object
-/// path, mirroring `blueprint_parser::filesystem_loader`'s convention.
+/// function — as the source of `imports` for resolution. The `DamageType`
+/// blueprint is extracted from `blueprints` by its `/Game/Blueprints/...`
+/// object path, mirroring `blueprint_parser::filesystem_loader`'s convention.
 ///
 /// `/Script/` (native class) paths short-circuit to `{"Type": ...}`;
 /// `/Game/` paths get the `_C`-suffix / duplicate-last-segment cleanup
@@ -267,8 +263,7 @@ pub fn build_damage_type_result(
 pub fn resolve_damage_type(
     ammo_code: &str,
     ammo_asset: &Value,
-    full_extraction: bool,
-    blueprint_loader: &AssetLoader,
+    blueprints: &Blueprints,
     loc_service: &LocalizationLookup,
 ) -> Option<Value> {
     // Get the damage type path from the ammo data table.
@@ -304,13 +299,7 @@ pub fn resolve_damage_type(
 
     // Load damage type blueprint.
     let object_path = format!("/Game/Blueprints/{}", bp_path.replace(".json", ""));
-    let dt_asset = blueprint_loader(&object_path)?;
-    let dt_data = blueprint_parser::extract_catalog_data(
-        &object_path,
-        &dt_asset,
-        full_extraction,
-        blueprint_loader,
-    )?;
+    let dt_data = Value::Object(blueprints.extract_path(&object_path)?);
 
     Some(build_damage_type_result(&dt_data, &bp_path, loc_service))
 }
@@ -612,7 +601,12 @@ mod tests {
         fn no_damage_type_path_returns_none() {
             let ammo = ammo_asset(json!({}));
             let loc = loc_service();
-            let result = resolve_damage_type("RifleAmmo", &ammo, false, &no_loader, &loc);
+            let result = resolve_damage_type(
+                "RifleAmmo",
+                &ammo,
+                &Blueprints::new(&no_loader, false),
+                &loc,
+            );
             assert_eq!(result, None);
         }
 
@@ -634,7 +628,12 @@ mod tests {
                 ],
             });
             let loc = loc_service();
-            let result = resolve_damage_type("RifleAmmo", &ammo, false, &no_loader, &loc);
+            let result = resolve_damage_type(
+                "RifleAmmo",
+                &ammo,
+                &Blueprints::new(&no_loader, false),
+                &loc,
+            );
             assert_eq!(result, Some(json!({"Type": "/Script/War"})));
         }
 
@@ -656,7 +655,12 @@ mod tests {
                 ],
             });
             let loc = loc_service();
-            let result = resolve_damage_type("RifleAmmo", &ammo, false, &no_loader, &loc);
+            let result = resolve_damage_type(
+                "RifleAmmo",
+                &ammo,
+                &Blueprints::new(&no_loader, false),
+                &loc,
+            );
             assert_eq!(result, None);
         }
 
@@ -697,7 +701,9 @@ mod tests {
             let loader = map_loader(assets);
 
             let loc = loc_service();
-            let result = resolve_damage_type("RifleAmmo", &ammo, false, &loader, &loc).unwrap();
+            let result =
+                resolve_damage_type("RifleAmmo", &ammo, &Blueprints::new(&loader, false), &loc)
+                    .unwrap();
             assert_eq!(result["Type"], json!("Kinetic"));
             assert_eq!(
                 result["ObjectPath"],
@@ -743,7 +749,9 @@ mod tests {
             let loader = map_loader(assets);
 
             let loc = loc_service();
-            let result = resolve_damage_type("RifleAmmo", &ammo, false, &loader, &loc).unwrap();
+            let result =
+                resolve_damage_type("RifleAmmo", &ammo, &Blueprints::new(&loader, false), &loc)
+                    .unwrap();
             assert_eq!(result["Type"], json!("Kinetic"));
         }
 
@@ -783,7 +791,9 @@ mod tests {
             let loader = map_loader(assets);
 
             let loc = loc_service();
-            let result = resolve_damage_type("ClusterAmmo", &ammo, false, &loader, &loc).unwrap();
+            let result =
+                resolve_damage_type("ClusterAmmo", &ammo, &Blueprints::new(&loader, false), &loc)
+                    .unwrap();
             assert_eq!(result["Type"], json!("Shrapnel"));
         }
     }

@@ -19,7 +19,7 @@
 //! `crate::catalog::utils::parse_reference` parses those back into raw
 //! indices.
 
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -62,101 +62,154 @@ const MAX_PARENT_DEPTH: usize = 64;
 ///
 /// Returns `None` if `asset` has no `Default__` export.
 ///
-/// No cross-call cache is kept here: this is a single pure function with no
-/// persistent pipeline object, so memoization is the caller's
-/// responsibility (e.g. by giving `loader` its own cache) if it's calling
-/// this repeatedly across a whole catalog build. Runaway recursion is cut
-/// off via the visited-set below, not via memoization.
+/// For several blueprints sharing ancestors, [`Blueprints::extract`] does
+/// the same, extracting each ancestor once rather than once per descendant.
 pub fn extract_catalog_data(
     object_path: &str,
     asset: &Value,
     full_extraction: bool,
     loader: &AssetLoader,
 ) -> Option<Value> {
-    let mut visited = HashSet::new();
-    extract_catalog_data_impl(object_path, asset, full_extraction, loader, &mut visited)
+    Blueprints::new(loader, full_extraction).extract(object_path, asset)
 }
 
-fn extract_catalog_data_impl(
-    object_path: &str,
-    asset: &Value,
+/// The blueprints `loader` loads, extracted as [`extract_catalog_data`]
+/// extracts them, with each one loaded through [`Blueprints::extract_path`]
+/// (the parents, components, projectiles and damage types the catalog's
+/// blueprints reference) extracted once and remembered, failures included.
+/// Many blueprints share these, so otherwise each shared one would be loaded
+/// and walked again for every blueprint referencing it, and a mod could make
+/// one large ancestor cost its size once per descendant and per level.
+///
+/// An ancestor is extracted with the parent chain walked from wherever it
+/// was first reached, so for a cyclic or over-deep chain (malformed input
+/// only) what it contributes may depend on which blueprint reached it first.
+pub struct Blueprints<'a> {
+    loader: &'a AssetLoader<'a>,
     full_extraction: bool,
-    loader: &AssetLoader,
-    visited: &mut HashSet<String>,
-) -> Option<Value> {
-    // `visited` holds the chain walked so far: stop on a cycle, and on a chain
-    // long enough to exhaust the stack (each level recurses back into here).
-    if visited.len() >= MAX_PARENT_DEPTH || !visited.insert(object_path.to_string()) {
-        return None;
-    }
+    extracted: RefCell<HashMap<String, Option<Map<String, Value>>>>,
+}
 
-    let exports = asset.get("exports").and_then(Value::as_array)?;
-    let empty_imports = Vec::new();
-    let imports = asset
-        .get("imports")
-        .and_then(Value::as_array)
-        .unwrap_or(&empty_imports);
-
-    let default_export = exports.iter().find(|e| {
-        e.get("object_name")
-            .and_then(Value::as_str)
-            .map(|s| s.starts_with("Default__"))
-            .unwrap_or(false)
-    })?;
-
-    let mut catalog_data = Map::new();
-    catalog_data.insert("ObjectPath".to_string(), json!(object_path));
-
-    // Step 2: ParentBlueprint via ClassIndex(-by-name) -> SuperIndex chain.
-    // Adapted once per asset: every import lookup below reads this shape.
-    let imports: Vec<Value> = imports
-        .iter()
-        .map(import_resolution::to_pascalcase_import)
-        .collect();
-    let parent_path = resolve_parent_blueprint(default_export, exports, &imports);
-    if let Some(ref p) = parent_path {
-        catalog_data.insert("ParentBlueprint".to_string(), json!(p));
-    }
-
-    // Step 3: process the Default__ export's properties. `uasset_to_full_json`
-    // omits `properties` entirely for `kind == "raw"` exports (the extraction
-    // tool couldn't parse them). In that case we stop here without
-    // attempting the parent merge.
-    let properties = match default_export.get("properties") {
-        Some(v @ Value::Object(_)) | Some(v @ Value::Array(_)) => v,
-        _ => return Some(Value::Object(catalog_data)),
-    };
-
-    let processed_imports = process_imports(&imports);
-    let extracted = process_data(
-        properties,
-        &processed_imports,
-        exports,
-        &imports,
-        full_extraction,
-    );
-    if let Value::Object(extracted_map) = extracted {
-        for (k, v) in extracted_map {
-            catalog_data.insert(k, v);
+impl<'a> Blueprints<'a> {
+    pub fn new(loader: &'a AssetLoader<'a>, full_extraction: bool) -> Self {
+        Self {
+            loader,
+            full_extraction,
+            extracted: RefCell::new(HashMap::new()),
         }
     }
 
-    // Step 4: merge parent data beneath the child's own (parent-first, child
-    // overrides all matching keys), only when the parent is itself a
-    // /Game/Blueprints/ asset.
-    if let Some(p) = &parent_path {
-        if p.starts_with("/Game/Blueprints/") {
-            if let Some(parent_asset) = loader(p) {
-                if let Some(Value::Object(parent_map)) =
-                    extract_catalog_data_impl(p, &parent_asset, full_extraction, loader, visited)
-                {
+    pub fn full_extraction(&self) -> bool {
+        self.full_extraction
+    }
+
+    /// [`extract_catalog_data`] of `asset`, the blueprint at `object_path`.
+    pub fn extract(&self, object_path: &str, asset: &Value) -> Option<Value> {
+        self.extract_impl(object_path, asset, &mut HashSet::new())
+    }
+
+    /// [`Self::extract`] of the blueprint `loader` loads for `object_path`,
+    /// `None` if it doesn't load or has no `Default__` export.
+    pub fn extract_path(&self, object_path: &str) -> Option<Map<String, Value>> {
+        self.extract_path_within(object_path, &mut HashSet::new())
+    }
+
+    fn extract_path_within(
+        &self,
+        object_path: &str,
+        visited: &mut HashSet<String>,
+    ) -> Option<Map<String, Value>> {
+        if let Some(extracted) = self.extracted.borrow().get(object_path) {
+            return extracted.clone();
+        }
+        let extracted = (self.loader)(object_path).and_then(|asset| {
+            match self.extract_impl(object_path, &asset, visited)? {
+                Value::Object(map) => Some(map),
+                _ => None,
+            }
+        });
+        self.extracted
+            .borrow_mut()
+            .insert(object_path.to_string(), extracted.clone());
+        extracted
+    }
+
+    fn extract_impl(
+        &self,
+        object_path: &str,
+        asset: &Value,
+        visited: &mut HashSet<String>,
+    ) -> Option<Value> {
+        // `visited` holds the chain walked so far: stop on a cycle, and on a chain
+        // long enough to exhaust the stack (each level recurses back into here).
+        if visited.len() >= MAX_PARENT_DEPTH || !visited.insert(object_path.to_string()) {
+            return None;
+        }
+
+        let exports = asset.get("exports").and_then(Value::as_array)?;
+        let empty_imports = Vec::new();
+        let imports = asset
+            .get("imports")
+            .and_then(Value::as_array)
+            .unwrap_or(&empty_imports);
+
+        let default_export = exports.iter().find(|e| {
+            e.get("object_name")
+                .and_then(Value::as_str)
+                .map(|s| s.starts_with("Default__"))
+                .unwrap_or(false)
+        })?;
+
+        let mut catalog_data = Map::new();
+        catalog_data.insert("ObjectPath".to_string(), json!(object_path));
+
+        // Step 2: ParentBlueprint via ClassIndex(-by-name) -> SuperIndex chain.
+        // Adapted once per asset: every import lookup below reads this shape.
+        let imports: Vec<Value> = imports
+            .iter()
+            .map(import_resolution::to_pascalcase_import)
+            .collect();
+        let parent_path = resolve_parent_blueprint(default_export, exports, &imports);
+        if let Some(ref p) = parent_path {
+            catalog_data.insert("ParentBlueprint".to_string(), json!(p));
+        }
+
+        // Step 3: process the Default__ export's properties. `uasset_to_full_json`
+        // omits `properties` entirely for `kind == "raw"` exports (the extraction
+        // tool couldn't parse them). In that case we stop here without
+        // attempting the parent merge.
+        let properties = match default_export.get("properties") {
+            Some(v @ Value::Object(_)) | Some(v @ Value::Array(_)) => v,
+            _ => return Some(Value::Object(catalog_data)),
+        };
+
+        let processed_imports = process_imports(&imports);
+        let extracted = process_data(
+            properties,
+            &processed_imports,
+            exports,
+            &imports,
+            self.full_extraction,
+        );
+        if let Value::Object(extracted_map) = extracted {
+            for (k, v) in extracted_map {
+                catalog_data.insert(k, v);
+            }
+        }
+
+        // Step 4: merge parent data beneath the child's own (parent-first, child
+        // overrides all matching keys), only when the parent is itself a
+        // /Game/Blueprints/ asset.
+        if let Some(p) = &parent_path {
+            if p.starts_with("/Game/Blueprints/") {
+                if let Some(parent_map) = self.extract_path_within(p, visited) {
                     catalog_data = merge_with_parent(catalog_data, parent_map);
                 }
             }
         }
-    }
 
-    Some(Value::Object(catalog_data))
+        Some(Value::Object(catalog_data))
+    }
 }
 
 /// Merge `parent_data` beneath `catalog_data` (parent values first, child
@@ -784,6 +837,34 @@ mod tests {
             let last = MAX_PARENT_DEPTH - 1;
             assert_eq!(result[format!("Level{last}")], json!(last));
             assert!(result.get(format!("Level{MAX_PARENT_DEPTH}")).is_none());
+        }
+
+        #[test]
+        fn blueprints_extract_a_shared_ancestor_chain_once() {
+            let assets: HashMap<String, Value> = (1..5)
+                .map(|i| (format!("/Game/Blueprints/Items/BP{i}"), chained_asset(i)))
+                .collect();
+            let calls = std::cell::Cell::new(0);
+            let loader = |path: &str| {
+                calls.set(calls.get() + 1);
+                assets.get(path).cloned()
+            };
+            let blueprints = Blueprints::new(&loader, false);
+
+            // Two children of `BP1`, whose chain ends at the missing `BP5`.
+            let first = blueprints
+                .extract("/Game/Blueprints/Items/BP0", &chained_asset(0))
+                .unwrap();
+            assert_eq!(calls.get(), 5);
+            let second = blueprints
+                .extract("/Game/Blueprints/Items/Other", &chained_asset(0))
+                .unwrap();
+
+            assert_eq!(calls.get(), 5);
+            for level in 0..5 {
+                assert_eq!(first[format!("Level{level}")], json!(level));
+                assert_eq!(second[format!("Level{level}")], json!(level));
+            }
         }
 
         #[test]
