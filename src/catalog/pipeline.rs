@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::catalog::blueprint_parser::{self, filesystem_loader, Blueprints};
-use crate::catalog::catalog_assembler::{self, AssemblerContext, DataTables};
+use crate::catalog::catalog_assembler::{self, AssemblerContext, LoadedDataTables};
 use crate::catalog::catalog_field_filter;
 use crate::catalog::data_table_lookup::{
     self, filesystem_blueprint_loader, filesystem_data_loader,
@@ -230,71 +230,8 @@ pub fn build_catalog_from_extract_dir_with_progress(
 
     let loc_service = LocalizationLookup::new(&localization_dir, None);
 
-    let data_loader = filesystem_data_loader(&data_dir);
-    let item_dynamic_data = data_loader(data_table_lookup::ITEM_DYNAMIC_DATA);
-    let weapon_dynamic_data = data_loader(data_table_lookup::WEAPON_DYNAMIC_DATA);
-    let grenade_dynamic_data = data_loader(data_table_lookup::GRENADE_DYNAMIC_DATA);
-    let melee_dynamic_data = data_loader(data_table_lookup::MELEE_DYNAMIC_DATA);
-    let structure_dynamic_data = data_loader(data_table_lookup::STRUCTURE_DYNAMIC_DATA);
-    let vehicle_dynamic_data = data_loader(data_table_lookup::VEHICLE_DYNAMIC_DATA);
-    let ship_dynamic_data = data_loader(data_table_lookup::SHIP_DYNAMIC_DATA);
-    let ammo_dynamic_data = data_loader(data_table_lookup::AMMO_DYNAMIC_DATA);
-    let item_profile_table = data_loader(data_table_lookup::ITEM_PROFILE_TABLE);
-    let structure_profile_table = data_loader(data_table_lookup::STRUCTURE_PROFILE_TABLE);
-    let vehicle_profile_table = data_loader(data_table_lookup::VEHICLE_PROFILE_TABLE);
-    let vehicle_movement_profile = data_loader(data_table_lookup::VEHICLE_MOVEMENT_PROFILE);
-
-    for (name, table) in [
-        (data_table_lookup::ITEM_DYNAMIC_DATA, &item_dynamic_data),
-        (data_table_lookup::WEAPON_DYNAMIC_DATA, &weapon_dynamic_data),
-        (
-            data_table_lookup::GRENADE_DYNAMIC_DATA,
-            &grenade_dynamic_data,
-        ),
-        (data_table_lookup::MELEE_DYNAMIC_DATA, &melee_dynamic_data),
-        (
-            data_table_lookup::STRUCTURE_DYNAMIC_DATA,
-            &structure_dynamic_data,
-        ),
-        (
-            data_table_lookup::VEHICLE_DYNAMIC_DATA,
-            &vehicle_dynamic_data,
-        ),
-        (data_table_lookup::SHIP_DYNAMIC_DATA, &ship_dynamic_data),
-        (data_table_lookup::AMMO_DYNAMIC_DATA, &ammo_dynamic_data),
-        (data_table_lookup::ITEM_PROFILE_TABLE, &item_profile_table),
-        (
-            data_table_lookup::STRUCTURE_PROFILE_TABLE,
-            &structure_profile_table,
-        ),
-        (
-            data_table_lookup::VEHICLE_PROFILE_TABLE,
-            &vehicle_profile_table,
-        ),
-        (
-            data_table_lookup::VEHICLE_MOVEMENT_PROFILE,
-            &vehicle_movement_profile,
-        ),
-    ] {
-        if table.is_none() {
-            log::warn!("build-catalog: data table not found, skipping: {name}");
-        }
-    }
-
-    let tables = DataTables {
-        item_dynamic_data: item_dynamic_data.as_ref(),
-        weapon_dynamic_data: weapon_dynamic_data.as_ref(),
-        grenade_dynamic_data: grenade_dynamic_data.as_ref(),
-        melee_dynamic_data: melee_dynamic_data.as_ref(),
-        structure_dynamic_data: structure_dynamic_data.as_ref(),
-        vehicle_dynamic_data: vehicle_dynamic_data.as_ref(),
-        ship_dynamic_data: ship_dynamic_data.as_ref(),
-        ammo_dynamic_data: ammo_dynamic_data.as_ref(),
-        item_profile_table: item_profile_table.as_ref(),
-        structure_profile_table: structure_profile_table.as_ref(),
-        vehicle_profile_table: vehicle_profile_table.as_ref(),
-        vehicle_movement_profile: vehicle_movement_profile.as_ref(),
-    };
+    let loaded_tables = LoadedDataTables::load(filesystem_data_loader(&data_dir));
+    let tables = loaded_tables.tables();
 
     let blueprint_file_loader = filesystem_blueprint_loader(&blueprints_dir);
     let factory_asset = blueprint_file_loader(data_table_lookup::FACTORY_BLUEPRINT);

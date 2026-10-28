@@ -58,6 +58,58 @@ pub struct DataTables<'a> {
     pub vehicle_movement_profile: Option<&'a Value>,
 }
 
+/// The assets a [`DataTables`] borrows, loaded by name.
+pub struct LoadedDataTables([Option<Value>; 12]);
+
+impl LoadedDataTables {
+    /// The tables' names, in the order [`Self::tables`] hands them out.
+    const NAMES: [&'static str; 12] = [
+        data_table_lookup::ITEM_DYNAMIC_DATA,
+        data_table_lookup::WEAPON_DYNAMIC_DATA,
+        data_table_lookup::GRENADE_DYNAMIC_DATA,
+        data_table_lookup::MELEE_DYNAMIC_DATA,
+        data_table_lookup::STRUCTURE_DYNAMIC_DATA,
+        data_table_lookup::VEHICLE_DYNAMIC_DATA,
+        data_table_lookup::SHIP_DYNAMIC_DATA,
+        data_table_lookup::AMMO_DYNAMIC_DATA,
+        data_table_lookup::ITEM_PROFILE_TABLE,
+        data_table_lookup::STRUCTURE_PROFILE_TABLE,
+        data_table_lookup::VEHICLE_PROFILE_TABLE,
+        data_table_lookup::VEHICLE_MOVEMENT_PROFILE,
+    ];
+
+    /// Loads each table by name through `load`, warning about any it doesn't
+    /// find: the lookups against that table are then skipped.
+    pub fn load(load: impl Fn(&str) -> Option<Value>) -> Self {
+        Self(Self::NAMES.map(|name| {
+            let table = load(name);
+            if table.is_none() {
+                log::warn!("build-catalog: data table not found, skipping: {name}");
+            }
+            table
+        }))
+    }
+
+    pub fn tables(&self) -> DataTables<'_> {
+        let [item_dynamic_data, weapon_dynamic_data, grenade_dynamic_data, melee_dynamic_data, structure_dynamic_data, vehicle_dynamic_data, ship_dynamic_data, ammo_dynamic_data, item_profile_table, structure_profile_table, vehicle_profile_table, vehicle_movement_profile] =
+            &self.0;
+        DataTables {
+            item_dynamic_data: item_dynamic_data.as_ref(),
+            weapon_dynamic_data: weapon_dynamic_data.as_ref(),
+            grenade_dynamic_data: grenade_dynamic_data.as_ref(),
+            melee_dynamic_data: melee_dynamic_data.as_ref(),
+            structure_dynamic_data: structure_dynamic_data.as_ref(),
+            vehicle_dynamic_data: vehicle_dynamic_data.as_ref(),
+            ship_dynamic_data: ship_dynamic_data.as_ref(),
+            ammo_dynamic_data: ammo_dynamic_data.as_ref(),
+            item_profile_table: item_profile_table.as_ref(),
+            structure_profile_table: structure_profile_table.as_ref(),
+            vehicle_profile_table: vehicle_profile_table.as_ref(),
+            vehicle_movement_profile: vehicle_movement_profile.as_ref(),
+        }
+    }
+}
+
 /// Everything [`assemble_catalog_entry`] needs beyond the blueprint asset
 /// itself: the data tables, the merged production-categories map (see
 /// `data_table_lookup::load_production_categories`), the localization
@@ -722,6 +774,35 @@ pub fn sort_catalog(catalog: &mut [Value]) {
 mod tests {
     use super::*;
     use crate::catalog::localization::LocalizationLookup;
+
+    #[test]
+    fn loaded_data_tables_hand_each_table_to_its_own_field() {
+        use data_table_lookup as names;
+        let loaded = LoadedDataTables::load(|name| Some(json!(name)));
+        let tables = loaded.tables();
+        for (table, name) in [
+            (tables.item_dynamic_data, names::ITEM_DYNAMIC_DATA),
+            (tables.weapon_dynamic_data, names::WEAPON_DYNAMIC_DATA),
+            (tables.grenade_dynamic_data, names::GRENADE_DYNAMIC_DATA),
+            (tables.melee_dynamic_data, names::MELEE_DYNAMIC_DATA),
+            (tables.structure_dynamic_data, names::STRUCTURE_DYNAMIC_DATA),
+            (tables.vehicle_dynamic_data, names::VEHICLE_DYNAMIC_DATA),
+            (tables.ship_dynamic_data, names::SHIP_DYNAMIC_DATA),
+            (tables.ammo_dynamic_data, names::AMMO_DYNAMIC_DATA),
+            (tables.item_profile_table, names::ITEM_PROFILE_TABLE),
+            (
+                tables.structure_profile_table,
+                names::STRUCTURE_PROFILE_TABLE,
+            ),
+            (tables.vehicle_profile_table, names::VEHICLE_PROFILE_TABLE),
+            (
+                tables.vehicle_movement_profile,
+                names::VEHICLE_MOVEMENT_PROFILE,
+            ),
+        ] {
+            assert_eq!(table, Some(&json!(name)));
+        }
+    }
 
     fn no_loader(_: &str) -> Option<Value> {
         None
