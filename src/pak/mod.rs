@@ -153,8 +153,23 @@ where
             fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
 
-        // Streamed straight to disk rather than through `reader.get`, which
-        // would hold the whole decompressed entry in memory.
+        // `read_file` holds the entry's stored bytes in memory, so an entry
+        // whose header is already over the budget is refused before it is
+        // read. The header comes from the pak and may understate the sizes;
+        // `CappedWriter` holds the decompressed output to the budget anyway,
+        // writing it straight to disk rather than through `reader.get`.
+        let size = reader
+            .entry_size(&path)
+            .with_context(|| format!("{path} is missing from the pak index"))?;
+        if size.stored.max(size.uncompressed) > budget.max_entry_bytes {
+            anyhow::bail!("{path} is larger than {} bytes", budget.max_entry_bytes);
+        }
+        if size.uncompressed > budget.remaining_bytes {
+            anyhow::bail!(
+                "extracting {path} would exceed the total size limit ({} bytes were left)",
+                budget.remaining_bytes
+            );
+        }
         let mut out = CappedWriter {
             inner: BufWriter::new(
                 File::create(&dest).with_context(|| format!("creating {}", dest.display()))?,
@@ -634,6 +649,29 @@ mod tests {
         assert_eq!(ExtractBudget::unpak(1 << 20).remaining_bytes, 16 << 30);
         assert_eq!(ExtractBudget::unpak(24 << 30).remaining_bytes, 768 << 30);
         assert_eq!(ExtractBudget::unpak(u64::MAX).remaining_bytes, u64::MAX);
+    }
+
+    /// The header check stops honest oversized entries; this is what stops
+    /// one whose header understates its size.
+    #[test]
+    fn capped_writer_fails_past_either_budget() {
+        let write = |max_entry_bytes, remaining_bytes| {
+            let mut out = CappedWriter {
+                inner: Vec::new(),
+                written: 0,
+                budget: ExtractBudget {
+                    max_entry_bytes,
+                    remaining_bytes,
+                },
+            };
+            out.write_all(&[0; 10])
+                .and_then(|()| out.write_all(&[0; 10]))
+        };
+        assert!(write(20, 20).is_ok());
+        let entry = write(15, 100).unwrap_err().to_string();
+        assert!(entry.contains("larger than 15 bytes"), "{entry}");
+        let total = write(100, 15).unwrap_err().to_string();
+        assert!(total.contains("total size limit"), "{total}");
     }
 
     #[test]

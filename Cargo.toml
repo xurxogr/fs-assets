@@ -50,8 +50,9 @@ clap = { version = "4", features = ["derive"] }
 # panics on bad UTF-16 names, so an untrusted mod pak could abort the
 # process; the fork bounds those reads by the real data (see its commit
 # 87c36e4) and moves to zstd 0.14.3 for the RustSec decompression advisories
-# (commit 4c08090).
-repak = { git = "https://github.com/xurxogr/repak", rev = "4c0809080080472b666db489adfc4671e493ac43" }
+# (commit 4c08090), and exposes entry sizes so an oversized entry can be
+# refused before it is read into memory (commit 7849813).
+repak = { git = "https://github.com/xurxogr/repak", rev = "784981318b6ca37f1c0f89f9bb5aed266329ad97" }
 # Recursive directory walk for `pack`'s "directory -> .pak" input traversal.
 walkdir = "2"
 # SIMD substring search for `grep-strings`.
