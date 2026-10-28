@@ -18,6 +18,7 @@ use serde_json::Value;
 
 use crate::catalog::blueprint_parser::{self, filesystem_loader, Blueprints};
 use crate::catalog::catalog_assembler::{self, AssemblerContext, DataTables};
+use crate::catalog::catalog_field_filter;
 use crate::catalog::data_table_lookup::{
     self, filesystem_blueprint_loader, filesystem_data_loader,
 };
@@ -118,6 +119,40 @@ pub fn is_catalog_input(pak_path: &str) -> bool {
     CATALOG_INPUT_PREFIXES
         .iter()
         .any(|prefix| path.starts_with(prefix))
+}
+
+/// Where [`build_catalog_to_file`] reads the game's catalog inputs from.
+pub enum CatalogSource<'a> {
+    /// A directory the game's pak was already extracted into.
+    ExtractDir(&'a Path),
+    /// The game's `.pak` itself (see [`build_catalog_from_pak`]).
+    Pak(&'a Path),
+}
+
+/// Builds the catalog from `source` and writes it to `output` as JSON,
+/// without the fields [`catalog_field_filter::filter_noise`] drops unless
+/// `full`. Progress is reported over a pak's extracted files to
+/// `extracting` and over the blueprint files to `building`.
+pub fn build_catalog_to_file(
+    source: CatalogSource<'_>,
+    output: &Path,
+    full: bool,
+    extracting: &dyn Fn(usize, usize) -> anyhow::Result<()>,
+    building: &dyn Fn(usize, usize) -> anyhow::Result<()>,
+) -> anyhow::Result<CatalogStats> {
+    let (entries, stats) = match source {
+        CatalogSource::ExtractDir(dir) => {
+            build_catalog_from_extract_dir_with_progress(dir, building)?
+        }
+        CatalogSource::Pak(pak) => build_catalog_from_pak_with_progress(pak, extracting, building)?,
+    };
+    let entries = if full {
+        entries
+    } else {
+        catalog_field_filter::filter_noise(&entries)
+    };
+    crate::atomic_write::write_json(output, &entries)?;
+    Ok(stats)
 }
 
 /// Builds the catalog straight from a `.pak`: only its catalog inputs

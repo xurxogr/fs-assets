@@ -538,6 +538,20 @@ pub fn dump(input: &Path, reference: Option<&Path>) -> Result<DumpDocument> {
     })
 }
 
+/// [`dump`]s `input` (against `reference`, if given) to `output` as JSON,
+/// returning how many namespaces it holds.
+pub fn dump_to_file(input: &Path, reference: Option<&Path>, output: &Path) -> Result<usize> {
+    let dumped = dump(input, reference)?;
+    crate::atomic_write::write_json(output, &dumped)?;
+    Ok(dumped.namespaces.len())
+}
+
+/// [`pack`]s the edited JSON translation file `input` (see [`read_dump`])
+/// into the `.locres` `output`.
+pub fn pack_file(input: &Path, output: &Path) -> Result<()> {
+    write(&pack(&read_dump(input)?)?, output)
+}
+
 /// Convert a `DumpDocument` (as edited by a translator) into a
 /// `LocresDocument` ready for `write`. Ignores `input_text` entirely.
 /// Errors loudly (rather than silently shipping empty strings into the

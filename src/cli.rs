@@ -417,24 +417,18 @@ fn run_command(
             output,
             full,
         } => {
-            let (entries, stats) = match (extract_dir, pak) {
-                (Some(dir), _) => catalog::pipeline::build_catalog_from_extract_dir_with_progress(
-                    &dir,
-                    &interruptible,
-                )?,
-                (None, Some(pak)) => catalog::pipeline::build_catalog_from_pak_with_progress(
-                    &pak,
-                    &interruptible,
-                    &interruptible,
-                )?,
+            let source = match (&extract_dir, &pak) {
+                (Some(dir), _) => catalog::pipeline::CatalogSource::ExtractDir(dir),
+                (None, Some(pak)) => catalog::pipeline::CatalogSource::Pak(pak),
                 (None, None) => anyhow::bail!("either --extract-dir or --pak is required"),
             };
-            let entries = if full {
-                entries
-            } else {
-                catalog::catalog_field_filter::filter_noise(&entries)
-            };
-            crate::atomic_write::write_json(&output, &entries)?;
+            let stats = catalog::pipeline::build_catalog_to_file(
+                source,
+                &output,
+                full,
+                &interruptible,
+                &interruptible,
+            )?;
             println!(
                 "parsed {} stockpilable {} errors {} total_files {}",
                 stats.parsed, stats.stockpilable, stats.errors, stats.total_files
@@ -581,18 +575,11 @@ fn run_command(
             output,
             reference,
         } => {
-            let dumped = locres::dump(&input, reference.as_deref())?;
-            crate::atomic_write::write_json(&output, &dumped)?;
-            println!(
-                "dumped {} namespace(s) to {}",
-                dumped.namespaces.len(),
-                output.display()
-            );
+            let namespaces = locres::dump_to_file(&input, reference.as_deref(), &output)?;
+            println!("dumped {namespaces} namespace(s) to {}", output.display());
         }
         Commands::LocresPack { input, output } => {
-            let dump_doc = locres::read_dump(&input)?;
-            let doc = locres::pack(&dump_doc)?;
-            locres::write(&doc, &output)?;
+            locres::pack_file(&input, &output)?;
             println!("packed to {}", output.display());
         }
         Commands::GrepStrings {

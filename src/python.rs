@@ -145,8 +145,6 @@ impl PakPaths {
     }
 }
 
-/// Picks the asset source from a mutually exclusive directory/pak pair of
-/// keyword arguments, rejecting both being given at once.
 /// The source a directory argument named `dir_name` and a pak argument named
 /// `pak_name` pick, if any, as [`AssetSource::from_options`].
 fn asset_source(
@@ -267,27 +265,23 @@ fn build_catalog(
 ) -> PyResult<Py<PyAny>> {
     let paks = pak.into_iter().collect();
     let source = required_asset_source("extract_dir", extract_dir, "pak", paks)?;
-    let progress = PyProgress::new(progress);
-    let building = |done: usize, total: usize| progress.report("building_catalog", done, total);
-    let result = py.detach(|| match &source {
-        AssetSource::ExtractDir(dir) => {
-            catalog::pipeline::build_catalog_from_extract_dir_with_progress(dir, &building)
-        }
+    let source = match &source {
+        AssetSource::ExtractDir(dir) => catalog::pipeline::CatalogSource::ExtractDir(dir),
         // Built from the single `pak` argument, so it holds exactly one.
-        AssetSource::Pak(paks) => catalog::pipeline::build_catalog_from_pak_with_progress(
-            &paks[0],
+        AssetSource::Pak(paks) => catalog::pipeline::CatalogSource::Pak(&paks[0]),
+    };
+    let progress = PyProgress::new(progress);
+    let result = py.detach(|| {
+        catalog::pipeline::build_catalog_to_file(
+            source,
+            &output,
+            full,
             &|done, total| progress.report("extracting_catalog_inputs", done, total),
-            &building,
-        ),
+            &|done, total| progress.report("building_catalog", done, total),
+        )
     });
     progress.finish()?;
-    let (entries, stats) = result.map_err(to_py_err)?;
-    let entries = if full {
-        entries
-    } else {
-        catalog::catalog_field_filter::filter_noise(&entries)
-    };
-    crate::atomic_write::write_json(&output, &entries).map_err(to_py_err)?;
+    let stats = result.map_err(to_py_err)?;
 
     let stats_json = serde_json::json!({
         "total_files": stats.total_files,
@@ -507,11 +501,9 @@ fn locres_dump(
     output: PathBuf,
     reference: Option<PathBuf>,
 ) -> PyResult<Py<PyAny>> {
-    let namespaces = py.detach(|| -> PyResult<usize> {
-        let dumped = locres::dump(&input, reference.as_deref()).map_err(to_py_err)?;
-        crate::atomic_write::write_json(&output, &dumped).map_err(to_py_err)?;
-        Ok(dumped.namespaces.len())
-    })?;
+    let namespaces = py
+        .detach(|| locres::dump_to_file(&input, reference.as_deref(), &output))
+        .map_err(to_py_err)?;
 
     let stats_json = serde_json::json!({ "namespaces": namespaces });
     json_to_py(py, &stats_json)
@@ -525,11 +517,8 @@ fn locres_dump(
 ///     output: Path to write the `.locres` to.
 #[pyfunction]
 fn locres_pack(py: Python<'_>, input: PathBuf, output: PathBuf) -> PyResult<()> {
-    py.detach(|| {
-        let dump_doc = locres::read_dump(&input).map_err(to_py_err)?;
-        let doc = locres::pack(&dump_doc).map_err(to_py_err)?;
-        locres::write(&doc, &output).map_err(to_py_err)
-    })
+    py.detach(|| locres::pack_file(&input, &output))
+        .map_err(to_py_err)
 }
 
 /// Search `.uasset`/`.uexp` files under a directory for a literal string,
