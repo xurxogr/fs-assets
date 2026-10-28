@@ -38,6 +38,7 @@ use std::str::FromStr;
 
 use hdf5::types::VarLenUnicode;
 
+use crate::atomic_write;
 use crate::database::{IconTemplate, ItemCategory, ItemFaction};
 
 /// Database format version. Must match `fs-ocr`'s `DATABASE_VERSION`
@@ -102,20 +103,13 @@ pub fn write_database(
     resolutions: &BTreeMap<i32, Vec<IconTemplate>>,
     output_path: &Path,
 ) -> anyhow::Result<()> {
-    let parent = match output_path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("."),
-    };
-    std::fs::create_dir_all(parent)?;
+    std::fs::create_dir_all(atomic_write::parent_dir(output_path))?;
 
-    let temp_path = tempfile::Builder::new()
-        .suffix(".h5.tmp")
-        .tempfile_in(parent)?
-        .into_temp_path();
+    let temp_path = atomic_write::temp_next_to(output_path, ".h5.tmp")?.into_temp_path();
     let file = hdf5::File::create(&temp_path)?;
     write_file(&file, resolutions)?;
     file.close()?;
-    crate::atomic_write::persist(temp_path, output_path)?;
+    atomic_write::persist(temp_path, output_path)?;
     Ok(())
 }
 

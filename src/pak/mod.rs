@@ -377,13 +377,7 @@ pub fn pack_with_progress(
         files.push((entry.into_path(), rel_str));
     }
 
-    let parent = match output.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("."),
-    };
-    let mut temp = tempfile::Builder::new()
-        .suffix(".pak.tmp")
-        .tempfile_in(parent)?;
+    let mut temp = crate::atomic_write::temp_next_to(output, ".pak.tmp")?;
     let mut writer = PakBuilder::new().writer(
         BufWriter::new(temp.as_file_mut()),
         version,

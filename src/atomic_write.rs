@@ -7,7 +7,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use tempfile::TempPath;
+use tempfile::{NamedTempFile, TempPath};
 
 /// Flushes the finished temporary file `temp` to disk, renames it to `dest`
 /// and flushes the rename. Without the first flush, a filesystem may commit
@@ -19,14 +19,20 @@ pub(crate) fn persist(temp: TempPath, dest: &Path) -> anyhow::Result<()> {
     sync_parent_dir(dest)
 }
 
+/// A new temporary file named with `suffix` in `dest`'s directory, where
+/// [`persist`] can rename it over `dest`.
+pub(crate) fn temp_next_to(dest: &Path, suffix: &str) -> std::io::Result<NamedTempFile> {
+    tempfile::Builder::new()
+        .suffix(suffix)
+        .tempfile_in(parent_dir(dest))
+}
+
 /// Replaces `dest` with `value` as pretty-printed JSON.
 pub(crate) fn write_json<T: serde::Serialize + ?Sized>(
     dest: &Path,
     value: &T,
 ) -> anyhow::Result<()> {
-    let mut temp = tempfile::Builder::new()
-        .suffix(".json.tmp")
-        .tempfile_in(parent_dir(dest))?;
+    let mut temp = temp_next_to(dest, ".json.tmp")?;
     let mut writer = BufWriter::new(temp.as_file_mut());
     serde_json::to_writer_pretty(&mut writer, value)?;
     writer.flush()?;
@@ -36,15 +42,13 @@ pub(crate) fn write_json<T: serde::Serialize + ?Sized>(
 
 /// Replaces `dest` with `bytes`.
 pub(crate) fn write_bytes(dest: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    let mut temp = tempfile::Builder::new()
-        .suffix(".tmp")
-        .tempfile_in(parent_dir(dest))?;
+    let mut temp = temp_next_to(dest, ".tmp")?;
     temp.write_all(bytes)?;
     persist(temp.into_temp_path(), dest)
 }
 
 /// The directory holding `path`, `.` for a bare file name.
-fn parent_dir(path: &Path) -> &Path {
+pub(crate) fn parent_dir(path: &Path) -> &Path {
     match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
