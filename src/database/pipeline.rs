@@ -291,9 +291,9 @@ where
 }
 
 /// Merges `new` templates into `existing`, per resolution, upserting by
-/// `(code, crated, mod_name)`: a template whose code, crated flag, *and* mod
-/// all match one already present replaces it in place, and anything else is
-/// appended. The database is expected to hold
+/// [`IconIdentity`]: a template whose code, faction, category, crated flag
+/// *and* mod all match one already present replaces it in place, and
+/// anything else is appended. The database is expected to hold
 /// multiple icons sharing a `(code, crated)` pair contributed by *different*
 /// mods (e.g. vanilla's rifle icon alongside a re-skin mod's rifle icon, both
 /// valid templates for OCR matching); only re-adding the *same* mod's own
@@ -305,11 +305,8 @@ fn merge_templates(
     for (resolution, new_templates) in new {
         let bucket = existing.entry(resolution).or_default();
         for template in new_templates {
-            match bucket.iter().position(|t| {
-                t.code == template.code
-                    && t.crated == template.crated
-                    && t.mod_name == template.mod_name
-            }) {
+            let identity = IconIdentity::of(&template);
+            match bucket.iter().position(|t| identity.matches(t)) {
                 Some(pos) => bucket[pos] = template,
                 None => bucket.push(template),
             }
@@ -425,6 +422,17 @@ pub struct IconIdentity {
 }
 
 impl IconIdentity {
+    /// The identity of `template`.
+    pub fn of(template: &IconTemplate) -> Self {
+        Self {
+            code: template.code.clone(),
+            faction: template.faction,
+            category: template.category,
+            crated: template.crated,
+            mod_name: template.mod_name.clone(),
+        }
+    }
+
     /// Whether `template` is this icon.
     pub fn matches(&self, template: &IconTemplate) -> bool {
         template.code == self.code
@@ -915,6 +923,21 @@ mod tests {
             assert_eq!(merged[&1080].len(), 2);
             assert!(merged[&1080].iter().any(|t| !t.crated));
             assert!(merged[&1080].iter().any(|t| t.crated));
+        }
+
+        /// Faction variants sharing a code are distinct icons, as
+        /// `modify-icon` treats them: neither replaces the other.
+        #[test]
+        fn same_code_faction_variants_both_survive() {
+            let mut colonial = template("Rifle", "cool_mod");
+            colonial.faction = database::ItemFaction::Colonials;
+            let mut warden = template("Rifle", "cool_mod");
+            warden.faction = database::ItemFaction::Wardens;
+            let mut new = BTreeMap::new();
+            new.insert(1080, vec![colonial, warden]);
+
+            let merged = merge_templates(BTreeMap::new(), new);
+            assert_eq!(merged[&1080].len(), 2);
         }
 
         #[test]
