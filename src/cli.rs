@@ -465,12 +465,13 @@ fn run_command(
             })?;
 
             println!(
-                "db: total_items {} items_embedded {} missing_code {} icons_missing {} decode_errors {}",
+                "db: total_items {} items_embedded {} missing_code {} icons_missing {} decode_errors {} overlays_missing {}",
                 stats.total_items,
                 stats.items_embedded,
                 stats.missing_code,
                 stats.icons_missing,
-                stats.decode_errors
+                stats.decode_errors,
+                stats.overlays_missing
             );
         }
         Commands::CheckPaks { catalog, pak } => {

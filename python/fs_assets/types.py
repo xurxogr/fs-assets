@@ -27,6 +27,7 @@ class DatabaseBuildStats(TypedDict):
     missing_code: int
     icons_missing: int
     decode_errors: int
+    overlays_missing: int
 
 
 class ExtractIconsStats(TypedDict):

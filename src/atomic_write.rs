@@ -198,7 +198,10 @@ mod tests {
 
         write_bytes(&link, b"new").unwrap();
 
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(std::fs::read(&target).unwrap(), b"new");
         assert_eq!(std::fs::read_dir(&target_dir).unwrap().count(), 1);
     }

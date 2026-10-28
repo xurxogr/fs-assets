@@ -380,6 +380,7 @@ fn add_mod(
         "missing_code": stats.missing_code,
         "icons_missing": stats.icons_missing,
         "decode_errors": stats.decode_errors,
+        "overlays_missing": stats.overlays_missing,
     });
     json_to_py(py, &stats_json)
 }

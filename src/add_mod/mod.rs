@@ -82,6 +82,11 @@ impl AssetSource {
         progress: &dyn Fn(usize, usize) -> anyhow::Result<()>,
     ) -> anyhow::Result<PathBuf> {
         match self {
+            // A mistyped directory would otherwise just resolve no icons:
+            // a run that "succeeds" with every icon or overlay missing.
+            AssetSource::ExtractDir(source_dir) if !source_dir.is_dir() => {
+                anyhow::bail!("extraction directory not found: {}", source_dir.display())
+            }
             AssetSource::ExtractDir(source_dir) => Ok(source_dir.clone()),
             AssetSource::Pak(paks) => {
                 let extracted =
@@ -478,6 +483,36 @@ mod tests {
 
         assert!(add_mod(&request, &|_| Ok(())).is_err());
         assert!(!request.db.exists());
+    }
+
+    #[test]
+    fn missing_extract_dir_errors_before_writing_anything() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pak_path = write_pak(tmp.path(), "mod.pak", &[&format!("{RIFLE_ICON}.uasset")]);
+        let missing = tmp.path().join("typo");
+        let as_source = request(
+            AssetSource::ExtractDir(missing.clone()),
+            write_catalog(tmp.path()),
+            tmp.path().join("database.h5"),
+        );
+        let as_vanilla = AddModRequest {
+            vanilla: Some(AssetSource::ExtractDir(missing)),
+            ..request(
+                AssetSource::Pak(vec![pak_path]),
+                write_catalog(tmp.path()),
+                tmp.path().join("database.h5"),
+            )
+        };
+
+        for request in [as_source, as_vanilla] {
+            let err = add_mod(&request, &|_| Ok(())).unwrap_err();
+
+            assert!(
+                err.to_string().contains("extraction directory not found"),
+                "{err}"
+            );
+            assert!(!request.db.exists());
+        }
     }
 
     #[test]

@@ -49,6 +49,9 @@ pub struct DatabaseBuildStats {
     /// Entries that successfully produced templates for every supported
     /// resolution.
     pub items_embedded: usize,
+    /// Embedded entries built without a subtype or crate overlay they have,
+    /// because it was missing or failed to decode.
+    pub overlays_missing: usize,
 }
 
 /// The `.uasset` file backing `icon_path` under `dir`, if there is one. An
@@ -180,7 +183,11 @@ fn load_optional_image<F>(path: &str, resolve_icon: &F) -> Option<DynamicImage>
 where
     F: Fn(&str) -> Option<PathBuf>,
 {
-    decode_icon(&resolve_icon(path)?)
+    let Some(file) = resolve_icon(path) else {
+        log::warn!("add-mod: overlay {path} not found");
+        return None;
+    };
+    decode_icon(&file)
         .map_err(|e| log::warn!("add-mod: {e}"))
         .ok()
 }
@@ -215,9 +222,11 @@ where
         .map(|r| (*r, Vec::new()))
         .collect();
     let mut stats = DatabaseBuildStats::default();
-    // `None` for an overlay that doesn't resolve or decode, and for a blank
-    // placeholder subicon.
-    let mut subicons: HashMap<String, Option<Arc<database::PreparedOverlay>>> = HashMap::new();
+    // `None` for an overlay that doesn't resolve or decode; `Some(None)` for
+    // a blank placeholder subicon, which has nothing to draw.
+    let mut subicons: HashMap<String, Option<Option<Arc<database::PreparedOverlay>>>> =
+        HashMap::new();
+    // Not loaded yet, then `Some(None)` if it doesn't resolve or decode.
     let mut crate_icon: Option<Option<Arc<database::PreparedOverlay>>> = None;
 
     progress(0, catalog.len())?;
@@ -252,25 +261,34 @@ where
             }
         };
 
-        let subicon = item.subicon_path.as_ref().and_then(|path| {
-            subicons
-                .entry(path.clone())
-                .or_insert_with(|| {
-                    load_optional_image(path, &resolve_icon)
-                        .and_then(|subicon| database::PreparedOverlay::subicon(&subicon))
-                        .map(Arc::new)
-                })
-                .clone()
-        });
+        let mut overlay_missing = false;
+        let subicon = item
+            .subicon_path
+            .as_ref()
+            .filter(|path| !path.is_empty())
+            .and_then(|path| {
+                let loaded = subicons
+                    .entry(path.clone())
+                    .or_insert_with(|| {
+                        load_optional_image(path, &resolve_icon).map(|subicon| {
+                            database::PreparedOverlay::subicon(&subicon).map(Arc::new)
+                        })
+                    })
+                    .clone();
+                overlay_missing |= loaded.is_none();
+                loaded.flatten()
+            });
         let crate_icon = item
             .cratable
             .then(|| {
-                crate_icon
+                let loaded = crate_icon
                     .get_or_insert_with(|| {
                         load_optional_image(database::CRATE_ICON_OBJECT_PATH, &resolve_icon)
                             .map(|crate_icon| Arc::new(database::PreparedOverlay::new(&crate_icon)))
                     })
-                    .clone()
+                    .clone();
+                overlay_missing |= loaded.is_none();
+                loaded
             })
             .flatten();
 
@@ -301,6 +319,9 @@ where
                 .extend(templates);
         }
         stats.items_embedded += 1;
+        if overlay_missing {
+            stats.overlays_missing += 1;
+        }
     }
     progress(catalog.len(), catalog.len())?;
 
@@ -688,6 +709,32 @@ mod tests {
             .unwrap();
 
             assert_eq!(reports.into_inner(), vec![(0, 2), (1, 2), (2, 2)]);
+        }
+
+        #[test]
+        fn counts_items_built_without_an_overlay_they_have() {
+            let tmp = tempfile::tempdir().unwrap();
+            let png = |name: &str| {
+                let path = tmp.path().join(format!("{name}.png"));
+                image::RgbaImage::from_pixel(32, 32, image::Rgba([200, 100, 50, 255]))
+                    .save(&path)
+                    .unwrap();
+                (format!("Icons/{name}"), path)
+            };
+            let files: StdHashMap<String, PathBuf> = ["T_Rifle", "T_Ammo", "T_Crate", "Subtype_Ok"]
+                .map(png)
+                .into();
+            let catalog = vec![
+                json!({"CodeName": "Rifle", "Icon": "Icons/T_Rifle", "SubTypeIcon": "Icons/Subtype_Ok"}),
+                json!({"CodeName": "Ammo", "Icon": "Icons/T_Ammo", "SubTypeIcon": "Icons/Subtype_Missing"}),
+                json!({"CodeName": "Crate", "Icon": "Icons/T_Crate", "bIsCratable": true}),
+            ];
+
+            let (_, stats) = build_database_from_catalog(&catalog, map_loader(files), "vanilla");
+
+            // Ammo's subicon and Crate's crate icon don't resolve.
+            assert_eq!(stats.items_embedded, 3);
+            assert_eq!(stats.overlays_missing, 2);
         }
 
         #[test]
