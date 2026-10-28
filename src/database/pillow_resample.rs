@@ -144,10 +144,45 @@ pub fn resize_lanczos_rgba(image: &RgbaImage, width: u32, height: u32) -> RgbaIm
     if image.dimensions() == (width, height) {
         return image.clone();
     }
-    let (in_w, in_h) = (image.width() as usize, image.height() as usize);
-    let (out_w, out_h) = (width as usize, height as usize);
+    resize_premultiplied(
+        &premultiply(image),
+        image.width(),
+        image.height(),
+        width,
+        height,
+    )
+}
 
-    let mut buffer: Vec<u8> = image
+/// An RGBA image to resize to several sizes, premultiplied once rather than
+/// at every [`resize_lanczos_rgba`]: a copy as large as the image, which the
+/// resizes then share instead of each making its own.
+pub struct LanczosSource {
+    image: RgbaImage,
+    premultiplied: Vec<u8>,
+}
+
+impl LanczosSource {
+    pub fn new(image: RgbaImage) -> Self {
+        let premultiplied = premultiply(&image);
+        Self {
+            image,
+            premultiplied,
+        }
+    }
+
+    /// The image resized as [`resize_lanczos_rgba`] resizes it.
+    pub fn resize(&self, width: u32, height: u32) -> RgbaImage {
+        if self.image.dimensions() == (width, height) {
+            return self.image.clone();
+        }
+        let (in_w, in_h) = self.image.dimensions();
+        resize_premultiplied(&self.premultiplied, in_w, in_h, width, height)
+    }
+}
+
+/// `image` as premultiplied RGBa bytes, rounding as Pillow does.
+fn premultiply(image: &RgbaImage) -> Vec<u8> {
+    image
         .pixels()
         .flat_map(|px| {
             [
@@ -157,15 +192,23 @@ pub fn resize_lanczos_rgba(image: &RgbaImage, width: u32, height: u32) -> RgbaIm
                 px[3],
             ]
         })
-        .collect();
-    let mut current_w = in_w;
-    if in_w != out_w {
-        buffer = resample_horizontal(&buffer, in_w, in_h, out_w);
-        current_w = out_w;
-    }
-    if in_h != out_h {
-        buffer = resample_vertical(&buffer, current_w, in_h, out_h);
-    }
+        .collect()
+}
+
+/// Resizes the premultiplied `in_w x in_h` image `src` to `width x height`
+/// and un-premultiplies the result.
+fn resize_premultiplied(src: &[u8], in_w: u32, in_h: u32, width: u32, height: u32) -> RgbaImage {
+    let (in_w, in_h) = (in_w as usize, in_h as usize);
+    let (out_w, out_h) = (width as usize, height as usize);
+    let mut buffer = match (in_w != out_w, in_h != out_h) {
+        (true, true) => {
+            let horizontal = resample_horizontal(src, in_w, in_h, out_w);
+            resample_vertical(&horizontal, out_w, in_h, out_h)
+        }
+        (true, false) => resample_horizontal(src, in_w, in_h, out_w),
+        (false, true) => resample_vertical(src, in_w, in_h, out_h),
+        (false, false) => src.to_vec(),
+    };
 
     for px in buffer.as_chunks_mut::<4>().0 {
         let alpha = px[3] as u32;
@@ -250,6 +293,17 @@ mod tests {
     fn same_size_is_a_copy() {
         let image = pattern();
         assert_eq!(resize_lanczos_rgba(&image, 13, 11), image);
+    }
+
+    #[test]
+    fn a_lanczos_source_resizes_like_resize_lanczos_rgba() {
+        let source = LanczosSource::new(pattern());
+        for (width, height) in [(5, 4), (17, 15), (13, 4), (5, 11), (13, 11)] {
+            assert_eq!(
+                source.resize(width, height),
+                resize_lanczos_rgba(&pattern(), width, height)
+            );
+        }
     }
 
     #[test]

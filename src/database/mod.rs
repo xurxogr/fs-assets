@@ -21,7 +21,7 @@ use image::{DynamicImage, RgbaImage};
 use serde_json::Value;
 
 use crate::catalog::stockpile_classifier::StockpileCategory;
-use pillow_resample::{flatten_on_black_to_bgr, resize_lanczos_rgba};
+use pillow_resample::{flatten_on_black_to_bgr, resize_lanczos_rgba, LanczosSource};
 
 /// Item faction classification, mirroring `fs-ocr`'s `ItemFaction` enum
 /// (`fs-ocr/src/enums/item_faction.rs`) **exactly**, including discriminant
@@ -322,8 +322,8 @@ pub fn is_blank_subicon(subicon: &DynamicImage) -> bool {
 
 /// Resizes `image` to `size x size` with Pillow's LANCZOS and alpha-composites
 /// it onto a black background, returning row-major BGR bytes.
-fn resize_and_flatten_to_bgr(image: &RgbaImage, size: u32) -> Vec<u8> {
-    flatten_on_black_to_bgr(&resize_lanczos_rgba(image, size, size))
+fn resize_and_flatten_to_bgr(image: &LanczosSource, size: u32) -> Vec<u8> {
+    flatten_on_black_to_bgr(&image.resize(size, size))
 }
 
 /// Applies the overlay color tint to every pixel with alpha above
@@ -348,12 +348,12 @@ fn tint_overlay(overlay: &RgbaImage) -> RgbaImage {
 /// (`size x size` BGR bytes), in place. `top_left` picks the subicon's
 /// corner; the crate overlay uses the opposite (bottom-right) corner. The
 /// blend is computed in `f32` (numpy float32 semantics).
-fn blend_overlay_bgr(base: &mut [u8], size: u32, tinted: &RgbaImage, top_left: bool) {
+fn blend_overlay_bgr(base: &mut [u8], size: u32, tinted: &LanczosSource, top_left: bool) {
     let overlay_size = ((size as f64) * SUBICON_ASPECT_RATIO) as u32;
     if overlay_size == 0 || overlay_size > size {
         return;
     }
-    let resized = resize_lanczos_rgba(tinted, overlay_size, overlay_size);
+    let resized = tinted.resize(overlay_size, overlay_size);
     let (x0, y0) = if top_left {
         (0, 0)
     } else {
@@ -617,31 +617,39 @@ pub fn build_icon_templates(
     crate_icon: Option<&DynamicImage>,
     resolution_height: i32,
 ) -> Vec<IconTemplate> {
-    PreparedIcon::new(image, subicon, crate_icon).templates(item, mod_name, resolution_height)
+    PreparedIcon::new(image.clone(), subicon, crate_icon).templates(
+        item,
+        mod_name,
+        resolution_height,
+    )
 }
 
 /// An item's main icon and overlays converted once for every resolution its
 /// templates are built at: the icon as RGBA, the overlays with their color
 /// tint applied, and a blank placeholder subicon (see [`is_blank_subicon`])
-/// dropped.
+/// dropped. Each is kept premultiplied too, so the resolutions, built in
+/// parallel, share that copy instead of each making one: for a large icon,
+/// one image's worth of memory rather than one per resolution.
 pub struct PreparedIcon {
-    image: RgbaImage,
-    subicon: Option<RgbaImage>,
-    crate_icon: Option<RgbaImage>,
+    image: LanczosSource,
+    subicon: Option<LanczosSource>,
+    crate_icon: Option<LanczosSource>,
 }
 
 impl PreparedIcon {
     pub fn new(
-        image: &DynamicImage,
+        image: DynamicImage,
         subicon: Option<&DynamicImage>,
         crate_icon: Option<&DynamicImage>,
     ) -> Self {
+        let prepare_overlay =
+            |overlay: &DynamicImage| LanczosSource::new(tint_overlay(&overlay.to_rgba8()));
         Self {
-            image: image.to_rgba8(),
+            image: LanczosSource::new(image.into_rgba8()),
             subicon: subicon
                 .filter(|subicon| !is_blank_subicon(subicon))
-                .map(|subicon| tint_overlay(&subicon.to_rgba8())),
-            crate_icon: crate_icon.map(|crate_icon| tint_overlay(&crate_icon.to_rgba8())),
+                .map(prepare_overlay),
+            crate_icon: crate_icon.map(prepare_overlay),
         }
     }
 

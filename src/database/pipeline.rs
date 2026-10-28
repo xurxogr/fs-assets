@@ -259,7 +259,7 @@ where
         // Each resolution resizes the icon from scratch, so they're built
         // in parallel from the one prepared copy.
         let prepared =
-            database::PreparedIcon::new(&image, subicon.as_deref(), crate_icon.as_deref());
+            database::PreparedIcon::new(image, subicon.as_deref(), crate_icon.as_deref());
         let built: Vec<Vec<IconTemplate>> = std::thread::scope(|scope| {
             let (prepared, item) = (&prepared, &item);
             let handles: Vec<_> = target_resolutions
