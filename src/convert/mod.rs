@@ -376,10 +376,10 @@ fn find_png_magic_offsets(haystack: &[u8]) -> Vec<usize> {
 }
 
 /// Cooked `FTexturePlatformData` pixel formats this module knows how to
-/// decode. Restricted to the formats actually confirmed against a real
-/// fixture in this pass (see `decode_compressed_mip0`'s doc comment) --
-/// `PF_BC4`/`PF_BC6H` etc. are plausible additions but untested, so they're
-/// deliberately left unhandled rather than guessed at.
+/// decode. Restricted to formats seen in real assets (see
+/// `decode_compressed_mip0`'s doc comment) -- `PF_BC4`/`PF_BC6H` etc. are
+/// plausible additions but untested, so they're deliberately left
+/// unhandled rather than guessed at.
 ///
 /// `PF_B8G8R8A8` is uncompressed (block-compressed formats need
 /// `texture2ddecoder`; this one is a raw per-pixel BGRA byte dump), confirmed
@@ -583,12 +583,8 @@ mod bulk_data_flags {
 /// `ElementCount: i32`, `BulkDataSizeOnDisk: u32`, then `BulkDataOffsetInFile`
 /// -- `i32` pre-`VER_UE4_BULKDATA_AT_LARGE_OFFSETS`, `i64` at/after it (true
 /// for every UE4.25 asset here, so this module always reads the 8-byte
-/// form) -- 20 bytes total, *not* 24 as a prior pass of this code assumed
-/// (that prior 24-byte assumption was silently reading 4 bytes into the
-/// following mip's `SizeX`/`SizeY`/`SizeZ` fields as if they were part of
-/// the bulk-data header; see `TextureHeader::mip0_header_offset`'s doc
-/// comment for the real source of that missing/extra 4 bytes -- a per-mip
-/// `cooked` bool that precedes this header, not a wider header itself).
+/// form) -- 20 bytes total. The 4 bytes before it are not part of it but a
+/// per-mip `cooked` bool (see `TextureHeader::mip0_header_offset`).
 struct Mip0Header {
     flags: u32,
     size_on_disk: u32,
@@ -866,8 +862,8 @@ fn find_texture2d_export_range(path: &Path, bytes: &[u8]) -> Option<(usize, usiz
 /// actual cooked runtime asset rather than an uncooked editor one).
 ///
 /// `unreal_asset` has zero `Texture2D`/`FTexturePlatformData` support, so
-/// this hand-parses the container from raw bytes (there's no existing Rust
-/// crate for that container format on crates.io as of this pass), then
+/// this hand-parses the container from raw bytes (no Rust crate on
+/// crates.io handles that container format), then
 /// hands the raw compressed block bytes to `texture2ddecoder` for the
 /// actual BC1/BC3/BC5/BC7 pixel math (deliberately not hand-rolled).
 ///
@@ -1036,21 +1032,22 @@ fn decode_blocks_into(
     Ok(())
 }
 
-/// Texture -> PNG export.
+/// Texture -> PNG export, from either of the two places a Foxhole
+/// `.uasset` texture holds its image (everything is in the one file, there
+/// is no separate `.uexp`/`.ubulk`):
 ///
-/// `unreal_asset` has no `Texture2D`/`FTexturePlatformData` support at all
-/// (confirmed: no `TextureExport`, no `PixelFormat` handling), so decoding
-/// the cooked mip chain the "textbook" way (property list, then hand-parse
-/// `FTexturePlatformData`/DXT blocks from the export's raw tail) was the
-/// expected path here. That turned out to be unnecessary for the fixtures
-/// actually available.
+/// 1. An embedded PNG, which uncooked/editor assets carry (see below), used
+///    when present.
+/// 2. Otherwise the cooked `FTexturePlatformData` mip chain, whose largest
+///    mip is decoded from its BC/DXT blocks or raw BGRA pixels by
+///    `decode_compressed_mip0` (see its doc comment for the formats and
+///    layouts handled). `unreal_asset` has no `Texture2D` support at all
+///    (no `TextureExport`, no `PixelFormat` handling), so that container is
+///    hand-parsed from the raw bytes.
 ///
-/// Byte-inspecting the three real Foxhole Slate UI icon fixtures in
-/// `tests/fixtures/textures/*.uasset` directly (there is no separate
-/// `.uexp`/`.ubulk`, so everything is in one file) showed each file embeds
-/// a byte-for-byte valid, complete PNG image *somewhere in the raw file*,
-/// preceded by a little-endian `u32` triple `[SizeX, SizeY, PngByteLen]`
-/// immediately before the PNG signature:
+/// The embedded PNG sits *somewhere in the raw file*, a byte-for-byte
+/// valid, complete PNG preceded by a little-endian `u32` triple
+/// `[SizeX, SizeY, PngByteLen]` immediately before the PNG signature:
 ///
 /// ```text
 /// sig-12..sig-8   u32  SizeX        (verified equal to the PNG's own IHDR width,
@@ -1063,32 +1060,26 @@ fn decode_blocks_into(
 ///
 /// This offset is **not** inside the `Texture2D` export's own serialized
 /// range (it sits much earlier in the file, before that export's
-/// `serial_offset`). The property list for the fixtures (`Source`,
+/// `serial_offset`). The property list of the assets carrying one (`Source`,
 /// `LightingGuid`, `MipGenSettings`, `NeverStream`, `LODGroup`, ...)
 /// includes editor-only fields that are normally stripped in a cooked
 /// shipping build, so these `.uasset` files are most likely **uncooked /
 /// editor-format** assets (plausible for Foxhole specifically, which has
 /// documented mod-tooling support built on raw editor assets) rather than
-/// runtime-cooked ones. Two things follow from that:
-/// 1. The embedded PNG is almost certainly UE4's `FObjectThumbnail` asset
-///    browser thumbnail cache, not `FTexturePlatformData` — but for a
-///    small square UI icon a thumbnail typically *is* a faithful full
-///    render of the texture, so it is usable as the "exported" image.
-/// 2. Real DXT1/DXT5/BC5-*compressed* `FTexturePlatformData` (the format a
-///    cooked 3D-model texture would actually use) was **never
-///    encountered** in this pass — no such fixture was available/tested,
-///    and this function does not attempt to decode one. When no
-///    plausible embedded-PNG blob is found, it errors out rather than
-///    guessing at a compressed-block layout.
+/// runtime-cooked ones. The embedded PNG is almost certainly UE4's
+/// `FObjectThumbnail` asset browser thumbnail cache, not
+/// `FTexturePlatformData` — but for a small square UI icon a thumbnail
+/// typically *is* a faithful full render of the texture, so it is usable as
+/// the "exported" image.
 ///
 /// A file can contain more than one PNG-magic occurrence (a spurious match
 /// against unrelated bytes, e.g. inside the name table, was observed in 2
 /// of the 3 fixtures) — each candidate is validated by checking its
 /// preceding `[W, H, Len]` header is consistent with the PNG (`W`/`H` equal
-/// to its IHDR size and within [`MAX_TEXTURE_DIMENSION`], `sig + Len` in
+/// to its IHDR size and within `MAX_TEXTURE_DIMENSION`, `sig + Len` in
 /// bounds, and the PNG actually ends with `IEND` at that exact position)
 /// and by decoding it, the next candidate being tried when it fails, up to
-/// [`MAX_PNG_DECODE_ATTEMPTS`] decodes.
+/// `MAX_PNG_DECODE_ATTEMPTS` decodes.
 pub fn uasset_to_png(path: &Path) -> anyhow::Result<Vec<u8>> {
     let image = uasset_to_image(path)?;
     let mut out = Vec::new();
