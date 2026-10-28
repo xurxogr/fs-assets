@@ -397,16 +397,15 @@ enum CompressedPixelFormat {
 }
 
 impl CompressedPixelFormat {
-    fn from_name(s: &[u8]) -> Option<Self> {
-        match s {
-            b"PF_DXT1" => Some(Self::Dxt1),
-            b"PF_DXT5" => Some(Self::Dxt5),
-            b"PF_BC5" => Some(Self::Bc5),
-            b"PF_BC7" => Some(Self::Bc7),
-            b"PF_B8G8R8A8" => Some(Self::B8g8r8a8),
-            _ => None,
-        }
-    }
+    /// Each format with the `EPixelFormat` name an `FTexturePlatformData`
+    /// serializes it as, in the order `find_texture_header` looks for them.
+    const NAMES: [(&'static [u8], Self); 5] = [
+        (b"PF_DXT1", Self::Dxt1),
+        (b"PF_DXT5", Self::Dxt5),
+        (b"PF_BC5", Self::Bc5),
+        (b"PF_BC7", Self::Bc7),
+        (b"PF_B8G8R8A8", Self::B8g8r8a8),
+    ];
 
     /// Bytes per 4x4 block (BC1/DXT1 packs 2 colors + indices into 8 bytes;
     /// BC3/DXT5/BC5/BC7 all use 16-byte blocks). `B8g8r8a8` isn't
@@ -490,16 +489,13 @@ fn find_texture_header(
     range_start: usize,
     range_end: usize,
 ) -> Option<TextureHeader> {
-    const NEEDLES: &[&[u8]] = &[b"PF_DXT1", b"PF_DXT5", b"PF_BC5", b"PF_BC7", b"PF_B8G8R8A8"];
-
     let range_end = range_end.min(bytes.len());
     if range_start >= range_end {
         return None;
     }
     let haystack = &bytes[range_start..range_end];
 
-    for &needle in NEEDLES {
-        let format = CompressedPixelFormat::from_name(needle)?;
+    for (needle, format) in CompressedPixelFormat::NAMES {
         let mut search_from = 0usize;
         while let Some(rel) = haystack[search_from..]
             .windows(needle.len())
