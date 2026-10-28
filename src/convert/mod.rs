@@ -335,6 +335,39 @@ const PNG_MAGIC: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 /// The `IEND` chunk type tag every valid PNG ends with.
 const PNG_IEND: [u8; 4] = *b"IEND";
 
+/// The most embedded-PNG candidates [`uasset_to_image`] decodes in one file.
+/// The real assets hold one; spurious PNG-magic matches fail the header
+/// checks before any decode.
+const MAX_PNG_DECODE_ATTEMPTS: usize = 4;
+
+/// Bytes of the smallest PNG: the signature, the IHDR chunk and the IEND one.
+const MIN_PNG_LEN: usize = PNG_MAGIC.len() + 25 + 12;
+
+/// The PNG whose signature is at `sig_offset` in `file_bytes`, if the
+/// `[W, H, Len]` header before it is consistent with it (see
+/// [`uasset_to_png`]): `Len` bytes from the signature end with `IEND`, and
+/// `W`/`H` match the PNG's own IHDR size and are within
+/// [`MAX_TEXTURE_DIMENSION`].
+fn embedded_png_at(file_bytes: &[u8], sig_offset: usize) -> Option<&[u8]> {
+    let header = file_bytes.get(sig_offset.checked_sub(12)?..sig_offset)?;
+    let le_u32 = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().unwrap());
+    let (width, height, png_len) = (le_u32(0), le_u32(4), le_u32(8) as usize);
+    if png_len < MIN_PNG_LEN {
+        return None;
+    }
+    let png = file_bytes.get(sig_offset..sig_offset.checked_add(png_len)?)?;
+    if png[png_len - 8..png_len - 4] != PNG_IEND {
+        return None;
+    }
+    // IHDR is the first chunk: length and type, then big-endian width and
+    // height.
+    let be_u32 = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
+    let max = MAX_TEXTURE_DIMENSION as u32;
+    let size_ok = |side: u32| (1..=max).contains(&side);
+    (size_ok(width) && size_ok(height) && (be_u32(16), be_u32(20)) == (width, height))
+        .then_some(png)
+}
+
 /// Finds every byte offset of `PNG_MAGIC` inside `haystack`.
 fn find_png_magic_offsets(haystack: &[u8]) -> Vec<usize> {
     (0..haystack.len().saturating_sub(PNG_MAGIC.len()))
@@ -1055,10 +1088,11 @@ fn decode_blocks_into(
 /// A file can contain more than one PNG-magic occurrence (a spurious match
 /// against unrelated bytes, e.g. inside the name table, was observed in 2
 /// of the 3 fixtures) — each candidate is validated by checking its
-/// preceding `[W, H, Len]` header is internally consistent (`Len > 0`,
-/// `sig + Len` in bounds, and the PNG actually ends with `IEND` at that
-/// exact position) and by decoding it, the next candidate being tried when
-/// it fails.
+/// preceding `[W, H, Len]` header is consistent with the PNG (`W`/`H` equal
+/// to its IHDR size and within [`MAX_TEXTURE_DIMENSION`], `sig + Len` in
+/// bounds, and the PNG actually ends with `IEND` at that exact position)
+/// and by decoding it, the next candidate being tried when it fails, up to
+/// [`MAX_PNG_DECODE_ATTEMPTS`] decodes.
 pub fn uasset_to_png(path: &Path) -> anyhow::Result<Vec<u8>> {
     let image = uasset_to_image(path)?;
     let mut out = Vec::new();
@@ -1080,27 +1114,17 @@ pub fn uasset_to_image(path: &Path) -> anyhow::Result<image::DynamicImage> {
     let file_bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
 
     let mut png_error = None;
+    let mut decode_attempts = 0;
     for sig_offset in find_png_magic_offsets(&file_bytes) {
-        if sig_offset < 12 {
-            continue;
-        }
-        let header: [u8; 12] = file_bytes[sig_offset - 12..sig_offset]
-            .try_into()
-            .expect("slice of length 12");
-        let png_len = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
-        if png_len == 0 {
-            continue;
-        }
-        let Some(png_end) = sig_offset
-            .checked_add(png_len)
-            .filter(|&end| end <= file_bytes.len())
-        else {
+        let Some(png_bytes) = embedded_png_at(&file_bytes, sig_offset) else {
             continue;
         };
-        if file_bytes[png_end - 8..png_end - 4] != PNG_IEND {
-            continue;
+        // Each decode may inflate up to `decode_png`'s memory limit, so a
+        // file can't make it run for every one of thousands of candidates.
+        if decode_attempts == MAX_PNG_DECODE_ATTEMPTS {
+            break;
         }
-        let png_bytes = &file_bytes[sig_offset..png_end];
+        decode_attempts += 1;
 
         // Decoded (rather than the embedded bytes passed through untouched)
         // so a corrupt/truncated embedded blob is caught here instead of
@@ -1261,24 +1285,45 @@ mod tests {
     }
 
     /// An embedded-PNG candidate as `uasset_to_image` looks for it: the
-    /// `[W, H, Len]` header, then `png` itself.
+    /// `[W, H, Len]` header, `W` and `H` taken from `png`'s IHDR, then `png`
+    /// itself.
     fn embedded_png_candidate(png: &[u8]) -> Vec<u8> {
-        let mut bytes = vec![0u8; 8];
+        let ihdr_side = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
+        embedded_png_candidate_sized(png, ihdr_side(16), ihdr_side(20))
+    }
+
+    fn embedded_png_candidate_sized(png: &[u8], width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = width.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&height.to_le_bytes());
         bytes.extend_from_slice(&(png.len() as u32).to_le_bytes());
         bytes.extend_from_slice(png);
         bytes
     }
 
-    #[test]
-    fn uasset_to_image_skips_an_embedded_png_candidate_that_fails_to_decode() {
-        let mut corrupt = png_bytes(2, 2);
-        corrupt[16..20].copy_from_slice(&0u32.to_be_bytes()); // IHDR width 0
+    /// A `width x height` PNG with a valid header that fails to decode: its
+    /// image data (IDAT) is dropped, leaving the signature, IHDR and IEND.
+    fn png_without_image_data(width: u32, height: u32) -> Vec<u8> {
+        let png = png_bytes(width, height);
+        [&png[..33], &png[png.len() - 12..]].concat()
+    }
+
+    fn uasset_with(candidates: &[Vec<u8>]) -> (tempfile::TempDir, std::path::PathBuf) {
         let mut file = b"junk".to_vec();
-        file.extend(embedded_png_candidate(&corrupt));
-        file.extend(embedded_png_candidate(&png_bytes(3, 5)));
+        for candidate in candidates {
+            file.extend(candidate);
+        }
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("Icon.uasset");
         std::fs::write(&path, file).unwrap();
+        (tmp, path)
+    }
+
+    #[test]
+    fn uasset_to_image_skips_an_embedded_png_candidate_that_fails_to_decode() {
+        let (_tmp, path) = uasset_with(&[
+            embedded_png_candidate(&png_without_image_data(2, 2)),
+            embedded_png_candidate(&png_bytes(3, 5)),
+        ]);
 
         let image = uasset_to_image(&path).unwrap();
 
@@ -1287,16 +1332,43 @@ mod tests {
 
     #[test]
     fn uasset_to_image_reports_an_embedded_png_that_fails_to_decode() {
-        let mut corrupt = png_bytes(2, 2);
-        corrupt[16..20].copy_from_slice(&0u32.to_be_bytes());
-        let mut file = b"junk".to_vec();
-        file.extend(embedded_png_candidate(&corrupt));
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("Icon.uasset");
-        std::fs::write(&path, file).unwrap();
+        let (_tmp, path) = uasset_with(&[embedded_png_candidate(&png_without_image_data(2, 2))]);
 
         let error = uasset_to_image(&path).unwrap_err().to_string();
 
+        assert!(error.starts_with("embedded PNG in "), "{error}");
+    }
+
+    #[test]
+    fn uasset_to_image_never_decodes_a_candidate_whose_header_disagrees_with_its_png() {
+        let png = png_bytes(3, 5);
+        let over_cap = MAX_TEXTURE_DIMENSION as u32 + 1;
+        for (width, height) in [(5, 3), (0, 5), (3, 0), (over_cap, 5)] {
+            let (_tmp, path) = uasset_with(&[embedded_png_candidate_sized(&png, width, height)]);
+
+            let error = uasset_to_image(&path).unwrap_err().to_string();
+
+            assert!(
+                error.starts_with("no embedded-PNG"),
+                "{width}x{height}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn uasset_to_image_decodes_at_most_max_png_decode_attempts_candidates() {
+        let broken = embedded_png_candidate(&png_without_image_data(2, 2));
+        let good = embedded_png_candidate(&png_bytes(3, 5));
+
+        let mut candidates = vec![broken.clone(); MAX_PNG_DECODE_ATTEMPTS - 1];
+        candidates.push(good.clone());
+        let (_tmp, path) = uasset_with(&candidates);
+        assert!(uasset_to_image(&path).is_ok());
+
+        let mut candidates = vec![broken; MAX_PNG_DECODE_ATTEMPTS];
+        candidates.push(good);
+        let (_tmp, path) = uasset_with(&candidates);
+        let error = uasset_to_image(&path).unwrap_err().to_string();
         assert!(error.starts_with("embedded PNG in "), "{error}");
     }
 
