@@ -205,20 +205,25 @@ struct CappedWriter<W> {
 
 impl<W: Write> Write for CappedWriter<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.written += buf.len() as u64;
-        if self.written > self.budget.max_entry_bytes {
+        // Checked against what this call could write, but only what `inner`
+        // actually wrote is counted: `write_all` passes the rest of a short
+        // write back in, and it must not be counted twice.
+        let after = self.written + buf.len() as u64;
+        if after > self.budget.max_entry_bytes {
             return Err(io::Error::other(format!(
                 "entry is larger than {} bytes",
                 self.budget.max_entry_bytes
             )));
         }
-        if self.written > self.budget.remaining_bytes {
+        if after > self.budget.remaining_bytes {
             return Err(io::Error::other(format!(
                 "extraction is larger than its total size limit ({} bytes were left)",
                 self.budget.remaining_bytes
             )));
         }
-        self.inner.write(buf)
+        let n = self.inner.write(buf)?;
+        self.written += n as u64;
+        Ok(n)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -668,6 +673,37 @@ mod tests {
         assert!(entry.contains("larger than 15 bytes"), "{entry}");
         let total = write(100, 15).unwrap_err().to_string();
         assert!(total.contains("total size limit"), "{total}");
+    }
+
+    /// A writer that takes at most 3 bytes per call, like a `write(2)` that
+    /// stops short of a huge buffer.
+    struct ShortWrites(Vec<u8>);
+
+    impl Write for ShortWrites {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let n = buf.len().min(3);
+            self.0.extend_from_slice(&buf[..n]);
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn capped_writer_counts_short_writes_once() {
+        let mut out = CappedWriter {
+            inner: ShortWrites(Vec::new()),
+            written: 0,
+            budget: ExtractBudget {
+                max_entry_bytes: 10,
+                remaining_bytes: 10,
+            },
+        };
+        out.write_all(&[0; 10]).unwrap();
+        assert_eq!(out.written, 10);
+        assert_eq!(out.inner.0.len(), 10);
     }
 
     #[test]
