@@ -45,6 +45,7 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
+          maturin-version: "1.15.0"
           target: ${{ matrix.platform.target }}
           # Passing --features replaces pyproject's [tool.maturin] features, so
           # `python` must be repeated here.
@@ -77,6 +78,7 @@ jobs:
       - name: Build sdist
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
+          maturin-version: "1.15.0"
           command: sdist
           args: --out dist
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
