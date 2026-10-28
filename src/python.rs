@@ -750,36 +750,20 @@ fn version() -> &'static str {
 ///         the parser as the original bytes, as they do the native binary.
 ///
 /// Returns:
-///     Process exit code: 0 on success, 1 on error, and clap's code for
-///     `--help`, `--version` (0) and bad arguments (2).
+///     Process exit code: 0 on success, 1 on error, 130 when Ctrl-C
+///     stopped the command, and clap's code for `--help`, `--version` (0)
+///     and bad arguments (2).
 #[pyfunction]
 fn cli_main(py: Python<'_>, argv: Vec<std::ffi::OsString>) -> i32 {
-    // Python's own SIGINT handler only raises once Python code runs again,
-    // which with the GIL released is after the whole command: Ctrl-C would
-    // be ignored. The default handler ends the process at once, as Ctrl-C
-    // does for the native binary.
-    let signal = py.import("signal").ok();
-    let previous_sigint = signal
-        .as_ref()
-        .and_then(|signal| swap_sigint_handler(signal, signal.getattr("SIG_DFL").ok()?));
-    // Release the GIL: the CLI does blocking I/O for the whole call.
-    let code = py.detach(|| crate::cli::run(argv));
-    if let (Some(signal), Some(previous)) = (&signal, previous_sigint) {
-        swap_sigint_handler(signal, previous);
-    }
-    code
-}
-
-/// Installs `handler` for SIGINT through the `signal` module and returns the
-/// one it replaced, or `None` if it couldn't (`signal.signal` only works on
-/// the main thread).
-fn swap_sigint_handler<'py>(
-    signal: &Bound<'py, PyModule>,
-    handler: Bound<'py, PyAny>,
-) -> Option<Bound<'py, PyAny>> {
-    signal
-        .call_method1("signal", (signal.getattr("SIGINT").ok()?, handler))
-        .ok()
+    // With the GIL released nothing runs Python's signal handlers, so the
+    // long commands run them at every progress report: Ctrl-C stops them
+    // there and they remove their temporary files, as with the native
+    // binary. The short ones return before Python raises `KeyboardInterrupt`.
+    py.detach(|| {
+        crate::cli::run_with_interrupt_check(argv, &|| {
+            Python::attach(|py| py.check_signals()).map_err(|_| crate::cli::Interrupted.into())
+        })
+    })
 }
 
 /// Native extension behind the `fs_assets` Python package.

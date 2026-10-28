@@ -300,7 +300,7 @@ def test_read_templates_rejects_an_unsupported_resolution(tmp_path):
         fs_assets.read_templates(str(db), 1234)
 
 
-def test_cli_main_restores_the_sigint_handler(tmp_path):
+def test_cli_main_leaves_the_sigint_handler_alone(tmp_path):
     before = signal.getsignal(signal.SIGINT)
     assert fs_assets.cli_main(["fs-assets", "grep-strings", "x", str(tmp_path / "missing")]) == 1
     assert signal.getsignal(signal.SIGINT) is before

@@ -271,11 +271,6 @@ impl log::Log for StderrLogger {
     fn flush(&self) {}
 }
 
-/// Runs the command line `args` (program name first) and returns the process
-/// exit code: 0 on success, 1 when the command fails,
-/// [`INTERRUPTED_EXIT_CODE`] when Ctrl-C stopped it, and clap's own code for
-/// `--help`, `--version` and bad arguments. Never exits the process
-/// itself, so the Python bindings can call it inside the interpreter.
 /// Set when Ctrl-C asks the running command to stop. The long commands check
 /// it at every progress report and stop there with [`Interrupted`], which
 /// unwinds normally so their temporary files are removed.
@@ -315,12 +310,26 @@ fn check_interrupted() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Progress callback of the commands that don't print their progress.
-fn interruptible(_done: usize, _total: usize) -> anyhow::Result<()> {
-    check_interrupted()
+/// Runs the command line `args` (program name first) and returns the process
+/// exit code: 0 on success, 1 when the command fails,
+/// [`INTERRUPTED_EXIT_CODE`] when Ctrl-C stopped it, and clap's own code for
+/// `--help`, `--version` and bad arguments. Never exits the process
+/// itself. Ctrl-C is the one [`request_interrupt`] reports.
+pub fn run<I, T>(args: I) -> i32
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    run_with_interrupt_check(args, &check_interrupted)
 }
 
-pub fn run<I, T>(args: I) -> i32
+/// Same as [`run`], with the long commands calling `check_interrupted` at
+/// every progress report and stopping with its error, e.g. [`Interrupted`].
+/// The Python bindings pass one that runs Python's signal handlers.
+pub fn run_with_interrupt_check<I, T>(
+    args: I,
+    check_interrupted: &dyn Fn() -> anyhow::Result<()>,
+) -> i32
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
@@ -350,7 +359,7 @@ where
         ),
         Ordering::Relaxed,
     );
-    exit_code(run_command(cli.command))
+    exit_code(run_command(cli.command, check_interrupted))
 }
 
 /// The exit code of a command that ended with `result`, reporting its error.
@@ -368,7 +377,12 @@ fn exit_code(result: anyhow::Result<()>) -> i32 {
     }
 }
 
-fn run_command(command: Commands) -> anyhow::Result<()> {
+fn run_command(
+    command: Commands,
+    check_interrupted: &dyn Fn() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    // Progress callback of the commands that don't print their progress.
+    let interruptible = |_done: usize, _total: usize| check_interrupted();
     match command {
         Commands::Unpak {
             pak,
@@ -645,6 +659,22 @@ mod tests {
         let wrapped = Err(anyhow::Error::from(Interrupted).context("while extracting"));
         assert_eq!(exit_code(wrapped), INTERRUPTED_EXIT_CODE);
         assert_eq!(exit_code(Err(anyhow::anyhow!("boom"))), 1);
+    }
+
+    #[test]
+    fn a_failing_interrupt_check_stops_a_long_command_with_130() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.uasset"), b"x").unwrap();
+        let args = [
+            OsString::from("fs-assets"),
+            "grep-strings".into(),
+            "x".into(),
+            tmp.path().into(),
+        ];
+        assert_eq!(
+            run_with_interrupt_check(args, &|| Err(Interrupted.into())),
+            INTERRUPTED_EXIT_CODE
+        );
     }
 
     #[test]
