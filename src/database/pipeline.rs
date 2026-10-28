@@ -115,10 +115,31 @@ pub fn overlay_icon_paths(catalog: &[Value]) -> HashSet<String> {
     paths
 }
 
+/// Largest icon side [`decode_icon`] accepts. The game's icons are at most
+/// 262 pixels; the templates are at most 64. An exact LANCZOS resize costs
+/// in proportion to the source's pixels at every resolution, so the texture
+/// cap of [`crate::convert`] (8192) would let each icon of a hostile mod
+/// cost seconds.
+pub const MAX_ICON_DIMENSION: u32 = 1024;
+
 /// Decodes one icon file to an in-memory image: a `.png` is read as is, a
 /// `.uasset` texture is converted first (catching a panicking decoder).
-/// Any other extension is rejected.
+/// Any other extension is rejected, and so is an image with a side over
+/// [`MAX_ICON_DIMENSION`].
 pub fn decode_icon(path: &Path) -> anyhow::Result<image::DynamicImage> {
+    let image = decode_icon_any_size(path)?;
+    if image.width().max(image.height()) > MAX_ICON_DIMENSION {
+        anyhow::bail!(
+            "icon {} is {}x{}, larger than {MAX_ICON_DIMENSION}x{MAX_ICON_DIMENSION}",
+            path.display(),
+            image.width(),
+            image.height()
+        );
+    }
+    Ok(image)
+}
+
+fn decode_icon_any_size(path: &Path) -> anyhow::Result<image::DynamicImage> {
     let extension = path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -559,6 +580,25 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::HashMap as StdHashMap;
+
+    #[test]
+    fn decode_icon_refuses_an_icon_larger_than_max_icon_dimension() {
+        let tmp = tempfile::tempdir().unwrap();
+        let save = |name: &str, width, height| {
+            let path = tmp.path().join(name);
+            image::RgbaImage::new(width, height).save(&path).unwrap();
+            path
+        };
+
+        let at_cap = save("at_cap.png", MAX_ICON_DIMENSION, 1);
+        assert!(decode_icon(&at_cap).is_ok());
+        let wide = save("wide.png", MAX_ICON_DIMENSION + 1, 1);
+        let tall = save("tall.png", 1, MAX_ICON_DIMENSION + 1);
+        for path in [wide, tall] {
+            let error = decode_icon(&path).unwrap_err().to_string();
+            assert!(error.contains("larger than 1024x1024"), "{error}");
+        }
+    }
 
     fn filesystem_icon_loader(extract_dir: &Path) -> impl Fn(&str) -> Option<PathBuf> + '_ {
         move |icon_path: &str| resolve_icon_file(extract_dir, icon_path)
