@@ -96,15 +96,16 @@ const EMPTY_VALUE: &str = "None";
 /// nesting level (inside objects and lists). Entry order is preserved and the
 /// input is left untouched.
 pub fn filter_noise(catalog: &[Value]) -> Vec<Value> {
-    catalog.iter().map(clean_value).collect()
+    catalog.iter().map(strip_noise).collect()
 }
 
-fn clean_value(value: &Value) -> Value {
+/// `value` without its noise fields, as [`filter_noise`] leaves an entry.
+fn strip_noise(value: &Value) -> Value {
     match value {
-        Value::Object(m) => Value::Object(clean_map(m)),
+        Value::Object(m) => Value::Object(strip_noise_from_map(m)),
         Value::Array(a) => Value::Array(
             a.iter()
-                .map(clean_value)
+                .map(strip_noise)
                 .filter(|v| !is_empty_slot(v))
                 .collect(),
         ),
@@ -112,10 +113,10 @@ fn clean_value(value: &Value) -> Value {
     }
 }
 
-fn clean_map(data: &Map<String, Value>) -> Map<String, Value> {
+fn strip_noise_from_map(data: &Map<String, Value>) -> Map<String, Value> {
     data.iter()
         .filter(|(key, value)| !is_noise(key) && !is_noise_value(key, value))
-        .map(|(key, value)| (key.clone(), clean_value(value)))
+        .map(|(key, value)| (key.clone(), strip_noise(value)))
         .filter(|(_, value)| !is_empty_slot(value) && !is_empty_container(value))
         .collect()
 }

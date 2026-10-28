@@ -194,12 +194,13 @@ pub fn clean_entry(data: &Value) -> Value {
         if value.is_null() {
             continue;
         }
-        result.insert(key.clone(), clean_value(value));
+        result.insert(key.clone(), normalize_value(value));
     }
     Value::Object(result)
 }
 
-fn clean_value(value: &Value) -> Value {
+/// One value of an entry [`clean_entry`] cleans, cleaned the same way.
+fn normalize_value(value: &Value) -> Value {
     match value {
         Value::String(s) if s.starts_with("/Game/") => json!(normalize_object_path(s)),
         Value::Object(_) => clean_entry(value),
@@ -207,7 +208,7 @@ fn clean_value(value: &Value) -> Value {
             items
                 .iter()
                 .filter_map(Value::as_array)
-                .filter_map(|pair| Some((pair[0].as_str()?.to_string(), clean_value(&pair[1]))))
+                .filter_map(|pair| Some((pair[0].as_str()?.to_string(), normalize_value(&pair[1]))))
                 .collect(),
         ),
         Value::Array(items) => {
