@@ -28,7 +28,9 @@ use crate::catalog::damage_type_resolver;
 use crate::catalog::data_table_lookup;
 use crate::catalog::localization::{self, LocalizationLookup};
 use crate::catalog::stockpile_classifier::{self, StockpileCategory};
-use crate::catalog::utils::{extract_localized_text, is_truthy, normalize_object_path};
+use crate::catalog::utils::{
+    blueprint_object_path, extract_localized_text, is_truthy, normalize_object_path,
+};
 
 /// Base path for hardcoded subtype icons (see [`add_subtype_icon`]).
 const SUBTYPE_ICONS_BASE: &str = "War/Content/Textures/UI/ItemIcons/";
@@ -355,18 +357,14 @@ pub fn enrich_item_component_class(data: &mut Map<String, Value>, blueprints: &B
         return;
     };
 
-    // The component's path relative to the Blueprints folder, from either a
-    // `/Game/Blueprints/...` reference or a normalized
+    // The component's path, as `blueprint_object_path` takes it, from either
+    // a `/Game/Blueprints/...` reference or a normalized
     // `War/Content/Blueprints/....0` object path.
-    let (mut item_comp, relative_path) = match &item_comp_raw {
+    let (mut item_comp, component_path) = match &item_comp_raw {
         Value::String(obj_path) => {
-            let relative_path = obj_path
-                .strip_prefix("/Game/Blueprints/")
-                .unwrap_or(obj_path)
-                .to_string();
             let mut m = Map::new();
             m.insert("ObjectPath".to_string(), json!(obj_path));
-            (m, relative_path)
+            (m, obj_path.clone())
         }
         Value::Object(m) => {
             let Some(obj_path) = m.get("ObjectPath").and_then(Value::as_str) else {
@@ -387,8 +385,9 @@ pub fn enrich_item_component_class(data: &mut Map<String, Value>, blueprints: &B
         _ => return,
     };
 
-    let object_path = format!("/Game/Blueprints/{relative_path}");
-    let Some(comp_data) = blueprints.extract_path(&object_path) else {
+    let comp_data = blueprint_object_path(&component_path)
+        .and_then(|object_path| blueprints.extract_path(&object_path));
+    let Some(comp_data) = comp_data else {
         // Parser couldn't load the component blueprint: still write back the
         // normalized (string -> dict) shape so consumers always see a
         // dict, even when the component couldn't be parsed.
@@ -431,13 +430,9 @@ pub fn enrich_item_component_class(data: &mut Map<String, Value>, blueprints: &B
         if let Some(Value::Array(projectile_classes)) = item_comp.get("ProjectileClasses") {
             if let Some(Value::String(first_proj)) = projectile_classes.first() {
                 if first_proj.starts_with("/Game/") {
-                    let proj_object_path = format!(
-                        "/Game/Blueprints/{}",
-                        first_proj
-                            .strip_prefix("/Game/Blueprints/")
-                            .unwrap_or(first_proj)
-                    );
-                    if let Some(proj_data) = blueprints.extract_path(&proj_object_path) {
+                    let proj_data = blueprint_object_path(first_proj)
+                        .and_then(|object_path| blueprints.extract_path(&object_path));
+                    if let Some(proj_data) = proj_data {
                         let mut proj_class = Map::new();
                         for (k, v) in proj_data {
                             if k != "ObjectPath" {

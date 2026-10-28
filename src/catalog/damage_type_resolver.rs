@@ -23,7 +23,8 @@ use crate::catalog::blueprint_parser::Blueprints;
 use crate::catalog::data_table_lookup;
 use crate::catalog::localization::{self, LocalizationLookup};
 use crate::catalog::utils::{
-    extract_localized_text, is_truthy, normalize_object_path, value_to_display_string,
+    blueprint_object_path, extract_localized_text, is_truthy, normalize_object_path,
+    value_to_display_string,
 };
 
 /// Determine the ammo code for resolving `DamageType`.
@@ -97,17 +98,16 @@ const SIMPLE_PROPERTY_KEYS: &[&str] = &[
 /// Build a resolved `DamageType` dict from blueprint data.
 ///
 /// `dt_data` is the extracted damage type blueprint data (e.g. from
-/// `blueprint_parser::extract_catalog_data`). `bp_path` is the blueprint
-/// path (used to build `ObjectPath`, e.g. `"DamageTypes/BPFoo.json"` ->
-/// `/Game/Blueprints/DamageTypes/BPFoo` -> normalized). `loc_service`
+/// `blueprint_parser::extract_catalog_data`). `object_path` is its
+/// `/Game/Blueprints/...` object path, written normalized as `ObjectPath`
+/// (e.g. `War/Content/Blueprints/DamageTypes/BPFoo.0`). `loc_service`
 /// resolves GUIDs in `DisplayName`/`DescriptionDetails`.
 pub fn build_damage_type_result(
     dt_data: &Value,
-    bp_path: &str,
+    object_path: &str,
     loc_service: &LocalizationLookup,
 ) -> Value {
-    let game_path = format!("/Game/Blueprints/{}", bp_path.replace(".json", ""));
-    let object_path = normalize_object_path(&game_path);
+    let object_path = normalize_object_path(object_path);
 
     let mut resolved = Map::new();
     resolved.insert("ObjectPath".to_string(), json!(object_path));
@@ -278,30 +278,24 @@ pub fn resolve_damage_type(
         return Some(json!({"Type": damage_type_path}));
     }
 
-    // Convert /Game/ path to relative path for the parser (kept ".json"-
-    // suffixed, which is the `bp_path` form `build_damage_type_result`
-    // expects).
-    // Only a segment's trailing `_C` (the generated-class suffix) goes: a
-    // name that merely contains `_C`, like `_Cluster`, is kept whole.
-    let mut bp_path = damage_type_path
-        .replace("/Game/Blueprints/", "")
+    // The blueprint's object path: only a segment's trailing `_C` (the
+    // generated-class suffix) goes, a name that merely contains `_C`, like
+    // `_Cluster`, is kept whole; and `.../BPFoo/BPFoo` becomes `.../BPFoo`.
+    let mut segments: Vec<&str> = damage_type_path
         .split('/')
         .map(|segment| segment.strip_suffix("_C").unwrap_or(segment))
-        .collect::<Vec<_>>()
-        .join("/");
-    {
-        let parts: Vec<&str> = bp_path.split('/').collect();
-        if parts.len() >= 2 && parts[parts.len() - 1] == parts[parts.len() - 2] {
-            bp_path = parts[..parts.len() - 1].join("/");
-        }
+        .collect();
+    if segments.len() >= 2 && segments[segments.len() - 1] == segments[segments.len() - 2] {
+        segments.pop();
     }
-    bp_path.push_str(".json");
-
-    // Load damage type blueprint.
-    let object_path = format!("/Game/Blueprints/{}", bp_path.replace(".json", ""));
+    let object_path = blueprint_object_path(&segments.join("/"))?;
     let dt_data = Value::Object(blueprints.extract_path(&object_path)?);
 
-    Some(build_damage_type_result(&dt_data, &bp_path, loc_service))
+    Some(build_damage_type_result(
+        &dt_data,
+        &object_path,
+        loc_service,
+    ))
 }
 
 #[cfg(test)]
@@ -434,7 +428,11 @@ mod tests {
         #[test]
         fn builds_object_path_from_bp_path() {
             let loc = loc_service();
-            let result = build_damage_type_result(&json!({}), "DamageTypes/BPKinetic.json", &loc);
+            let result = build_damage_type_result(
+                &json!({}),
+                "/Game/Blueprints/DamageTypes/BPKinetic",
+                &loc,
+            );
             assert!(result.get("ObjectPath").is_some());
             assert_eq!(
                 result["ObjectPath"],
@@ -446,7 +444,8 @@ mod tests {
         fn copies_known_properties() {
             let loc = loc_service();
             let dt_data = json!({"Type": "Kinetic", "bCanWoundCharacter": true});
-            let result = build_damage_type_result(&dt_data, "DamageTypes/BP.json", &loc);
+            let result =
+                build_damage_type_result(&dt_data, "/Game/Blueprints/DamageTypes/BP", &loc);
             assert_eq!(result["Type"], json!("Kinetic"));
             assert_eq!(result["bCanWoundCharacter"], json!(true));
         }
@@ -455,7 +454,8 @@ mod tests {
         fn icon_simplified_to_resource_object() {
             let loc = loc_service();
             let dt_data = json!({"Icon": {"ResourceObject": "/Game/Icons/Foo"}});
-            let result = build_damage_type_result(&dt_data, "DamageTypes/BP.json", &loc);
+            let result =
+                build_damage_type_result(&dt_data, "/Game/Blueprints/DamageTypes/BP", &loc);
             assert_eq!(result["Icon"], json!("/Game/Icons/Foo"));
         }
 
@@ -463,7 +463,8 @@ mod tests {
         fn display_name_plain_text_used_as_is() {
             let loc = loc_service();
             let dt_data = json!({"DisplayName": "Kinetic Damage"});
-            let result = build_damage_type_result(&dt_data, "DamageTypes/BP.json", &loc);
+            let result =
+                build_damage_type_result(&dt_data, "/Game/Blueprints/DamageTypes/BP", &loc);
             assert_eq!(result["DisplayName"], json!("Kinetic Damage"));
         }
 
@@ -474,7 +475,8 @@ mod tests {
             let loc = loc_service();
             let guid = "8BB336F4459740A6ADA7B28B2D91748B";
             let dt_data = json!({"DisplayName": guid});
-            let result = build_damage_type_result(&dt_data, "DamageTypes/BP.json", &loc);
+            let result =
+                build_damage_type_result(&dt_data, "/Game/Blueprints/DamageTypes/BP", &loc);
             assert_eq!(result["DisplayName"], json!(guid));
         }
 
@@ -482,7 +484,8 @@ mod tests {
         fn description_details_string_items() {
             let loc = loc_service();
             let dt_data = json!({"DescriptionDetails": ["Line one", "Line two"]});
-            let result = build_damage_type_result(&dt_data, "DamageTypes/BP.json", &loc);
+            let result =
+                build_damage_type_result(&dt_data, "/Game/Blueprints/DamageTypes/BP", &loc);
             assert_eq!(result["DescriptionDetails"], json!("Line one\nLine two"));
         }
 
@@ -490,7 +493,8 @@ mod tests {
         fn description_details_dict_item_plain_text() {
             let loc = loc_service();
             let dt_data = json!({"DescriptionDetails": [{"Text": "Plain text"}]});
-            let result = build_damage_type_result(&dt_data, "DamageTypes/BP.json", &loc);
+            let result =
+                build_damage_type_result(&dt_data, "/Game/Blueprints/DamageTypes/BP", &loc);
             assert_eq!(result["DescriptionDetails"], json!("Plain text"));
         }
 
@@ -498,7 +502,8 @@ mod tests {
         fn description_details_skips_unrecognized_items() {
             let loc = loc_service();
             let dt_data = json!({"DescriptionDetails": [123, ""]});
-            let result = build_damage_type_result(&dt_data, "DamageTypes/BP.json", &loc);
+            let result =
+                build_damage_type_result(&dt_data, "/Game/Blueprints/DamageTypes/BP", &loc);
             assert!(result.get("DescriptionDetails").is_none());
         }
 
@@ -528,7 +533,8 @@ mod tests {
 
             let loc = LocalizationLookup::new(&tmp, None);
             let dt_data = json!({"DescriptionDetails": [guid]});
-            let result = build_damage_type_result(&dt_data, "DamageTypes/BP.json", &loc);
+            let result =
+                build_damage_type_result(&dt_data, "/Game/Blueprints/DamageTypes/BP", &loc);
 
             assert_eq!(result["DescriptionDetails"], json!("English text"));
             assert_eq!(
@@ -541,7 +547,8 @@ mod tests {
         fn description_details_generated_from_breaches_bunkers() {
             let loc = loc_service();
             let dt_data = json!({"bBreachesBunkers": true});
-            let result = build_damage_type_result(&dt_data, "DamageTypes/BP.json", &loc);
+            let result =
+                build_damage_type_result(&dt_data, "/Game/Blueprints/DamageTypes/BP", &loc);
             assert_eq!(
                 result["DescriptionDetails"],
                 json!("Always has a chance to breach bunkers")
@@ -551,7 +558,8 @@ mod tests {
         #[test]
         fn no_description_details_when_nothing_applies() {
             let loc = loc_service();
-            let result = build_damage_type_result(&json!({}), "DamageTypes/BP.json", &loc);
+            let result =
+                build_damage_type_result(&json!({}), "/Game/Blueprints/DamageTypes/BP", &loc);
             assert!(result.get("DescriptionDetails").is_none());
         }
 
@@ -562,7 +570,8 @@ mod tests {
                 "DescriptionDetails": ["Explicit line"],
                 "bBreachesBunkers": true,
             });
-            let result = build_damage_type_result(&dt_data, "DamageTypes/BP.json", &loc);
+            let result =
+                build_damage_type_result(&dt_data, "/Game/Blueprints/DamageTypes/BP", &loc);
             assert_eq!(result["DescriptionDetails"], json!("Explicit line"));
         }
 

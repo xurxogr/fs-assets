@@ -17,6 +17,19 @@ pub(crate) fn load_full_json(root: &Path, path: &Path) -> Option<Value> {
         .ok()
 }
 
+/// The `/Game/Blueprints/...` object path of `path`, which is either one
+/// already or relative to `Blueprints/`. `None` for any other absolute path:
+/// only blueprints under `Blueprints/` are loaded.
+pub fn blueprint_object_path(path: &str) -> Option<String> {
+    if path.starts_with("/Game/Blueprints/") {
+        Some(path.to_string())
+    } else if path.starts_with('/') {
+        None
+    } else {
+        Some(format!("/Game/Blueprints/{path}"))
+    }
+}
+
 /// Normalize an object path to War/Content format.
 ///
 /// Converts `/Game/` paths to `War/Content/` format and ensures a `.0` suffix.
@@ -189,6 +202,18 @@ pub fn import_at(import_index: i64, imports: &[Value]) -> Option<&Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blueprint_object_path_keeps_or_builds_a_blueprints_path() {
+        let expected = Some("/Game/Blueprints/Items/BPRifle".to_string());
+        assert_eq!(
+            blueprint_object_path("/Game/Blueprints/Items/BPRifle"),
+            expected
+        );
+        assert_eq!(blueprint_object_path("Items/BPRifle"), expected);
+        assert_eq!(blueprint_object_path("/Game/Other/BPRifle"), None);
+        assert_eq!(blueprint_object_path("/Script/Engine"), None);
+    }
 
     #[test]
     fn import_slot_decodes_negative_indices_without_overflowing() {
