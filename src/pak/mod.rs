@@ -356,7 +356,9 @@ pub fn pack_with_progress(
 ) -> anyhow::Result<Vec<String>> {
     let output_file = output.canonicalize().ok();
     let mut files = Vec::new();
-    for entry in walkdir::WalkDir::new(input_dir) {
+    // Sorted, so the same directory packs to the same bytes whatever order
+    // the filesystem lists it in.
+    for entry in walkdir::WalkDir::new(input_dir).sort_by_file_name() {
         let entry = entry?;
         if !entry.file_type().is_file()
             || output_file.is_some() && entry.path().canonicalize().ok() == output_file
