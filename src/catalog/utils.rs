@@ -94,6 +94,9 @@ pub(crate) fn is_truthy(value: &Value) -> bool {
     }
 }
 
+/// `i64::MIN` (-2^63) as a float, exactly; 2^63 is its negation.
+const I64_MIN_F64: f64 = i64::MIN as f64;
+
 /// Simplify extracted values.
 ///
 /// - Convert floats to ints if they're whole numbers
@@ -104,8 +107,17 @@ pub fn simplify_value(value: &Value) -> Value {
     match value {
         Value::Number(n) if n.is_f64() => {
             let f = n.as_f64().unwrap();
-            let rounded = (f * 1_000_000.0).round() / 1_000_000.0;
-            if rounded == rounded.trunc() && rounded.is_finite() {
+            // Past ~1.8e302 scaling overflows to infinity (which JSON can't
+            // hold); a float that large has no decimals to round anyway.
+            let scaled = f * 1_000_000.0;
+            let rounded = if scaled.is_finite() {
+                scaled.round() / 1_000_000.0
+            } else {
+                f
+            };
+            // `as i64` saturates, so a whole float outside the `i64` range
+            // (UE's `FLT_MAX` "no limit" defaults) stays the float it is.
+            if rounded == rounded.trunc() && (I64_MIN_F64..-I64_MIN_F64).contains(&rounded) {
                 json!(rounded as i64)
             } else {
                 json!(rounded)
@@ -375,6 +387,25 @@ mod tests {
         fn rounds_float_to_6_decimals() {
             let result = simplify_value(&json!(1.23456789));
             assert_eq!(result, json!(1.234568));
+        }
+
+        #[test]
+        fn keeps_whole_floats_outside_the_i64_range() {
+            let max = f64::from(f32::MAX);
+            assert_eq!(simplify_value(&json!(max)), json!(max));
+            assert_eq!(simplify_value(&json!(-max)), json!(-max));
+            assert_eq!(simplify_value(&json!(1e19)), json!(1e19));
+            assert_eq!(simplify_value(&json!(1e303)), json!(1e303));
+            assert_eq!(simplify_value(&json!(-1e303)), json!(-1e303));
+        }
+
+        #[test]
+        fn converts_whole_floats_at_the_edges_of_the_i64_range() {
+            let result = simplify_value(&json!(-9_223_372_036_854_775_808.0));
+            assert_eq!(result, json!(i64::MIN));
+            // The float just below 2^63.
+            let result = simplify_value(&json!(9_223_372_036_854_774_784.0));
+            assert_eq!(result, json!(9_223_372_036_854_774_784_i64));
         }
 
         #[test]
