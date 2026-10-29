@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Write};
 use std::path::{Component, Path, PathBuf};
@@ -144,15 +144,26 @@ where
     progress(0, total)?;
 
     let mut extracted = Vec::with_capacity(total);
+    // Directories already checked for symlinks and created, so the many
+    // entries sharing one only walk its path once.
+    let mut ready_dirs: HashSet<PathBuf> = HashSet::new();
     for (path, dest) in wanted {
-        if has_symlink_below(output_dir, &dest) {
+        let parent = atomic_write::parent_dir(&dest);
+        let through_symlink = if ready_dirs.contains(parent) {
+            fs::symlink_metadata(&dest).is_ok_and(|metadata| metadata.file_type().is_symlink())
+        } else {
+            has_symlink_below(output_dir, &dest)
+        };
+        if through_symlink {
             anyhow::bail!(
                 "{path} would be written through a symlink in {}",
                 output_dir.display()
             );
         }
-        let parent = atomic_write::parent_dir(&dest);
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        if !ready_dirs.contains(parent) {
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+            ready_dirs.insert(parent.to_path_buf());
+        }
 
         // `read_file` holds the entry's stored bytes in memory, so an entry
         // whose header is already over the budget is refused before it is
@@ -717,6 +728,25 @@ mod tests {
         let err = extract(&pak_path, None, &out_dir).unwrap_err();
         assert!(err.to_string().contains("symlink"), "{err}");
         assert!(!outside.join("escape.txt").exists());
+    }
+
+    /// The second entry's directory was already checked for the first one,
+    /// but a link at the entry itself is still refused.
+    #[cfg(unix)]
+    #[test]
+    fn extraction_refuses_a_symlinked_entry_in_an_already_checked_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pak_path = tmp.path().join("test.pak");
+        fs::write(&pak_path, build_pak_with(&["War/a.txt", "War/b.txt"])).unwrap();
+        let outside = tmp.path().join("outside.txt");
+        fs::write(&outside, "untouched").unwrap();
+        let out_dir = tmp.path().join("out");
+        fs::create_dir_all(out_dir.join("War")).unwrap();
+        std::os::unix::fs::symlink(&outside, out_dir.join("War/b.txt")).unwrap();
+
+        let err = extract(&pak_path, None, &out_dir).unwrap_err();
+        assert!(err.to_string().contains("symlink"), "{err}");
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "untouched");
     }
 
     #[test]
