@@ -25,7 +25,7 @@ use serde_json::{json, Map, Value};
 
 use crate::catalog::blueprint_parser::Blueprints;
 use crate::catalog::damage_type_resolver;
-use crate::catalog::data_table_lookup;
+use crate::catalog::data_table_lookup::{self, DataTable, ProfileTable};
 use crate::catalog::localization::{self, LocalizationLookup};
 use crate::catalog::stockpile_classifier::{self, StockpileCategory};
 use crate::catalog::utils::{
@@ -44,18 +44,18 @@ pub const LOCALIZABLE_FIELDS: &[&str] = &["DisplayName", "Description", "Chassis
 /// available" and causes that lookup to be silently skipped.
 #[derive(Default)]
 pub struct DataTables<'a> {
-    pub item_dynamic_data: Option<&'a Value>,
-    pub weapon_dynamic_data: Option<&'a Value>,
-    pub grenade_dynamic_data: Option<&'a Value>,
-    pub melee_dynamic_data: Option<&'a Value>,
-    pub structure_dynamic_data: Option<&'a Value>,
-    pub vehicle_dynamic_data: Option<&'a Value>,
-    pub ship_dynamic_data: Option<&'a Value>,
-    pub ammo_dynamic_data: Option<&'a Value>,
-    pub item_profile_table: Option<&'a Value>,
-    pub structure_profile_table: Option<&'a Value>,
-    pub vehicle_profile_table: Option<&'a Value>,
-    pub vehicle_movement_profile: Option<&'a Value>,
+    pub item_dynamic_data: Option<DataTable<'a>>,
+    pub weapon_dynamic_data: Option<DataTable<'a>>,
+    pub grenade_dynamic_data: Option<DataTable<'a>>,
+    pub melee_dynamic_data: Option<DataTable<'a>>,
+    pub structure_dynamic_data: Option<DataTable<'a>>,
+    pub vehicle_dynamic_data: Option<DataTable<'a>>,
+    pub ship_dynamic_data: Option<DataTable<'a>>,
+    pub ammo_dynamic_data: Option<DataTable<'a>>,
+    pub item_profile_table: Option<ProfileTable<'a>>,
+    pub structure_profile_table: Option<ProfileTable<'a>>,
+    pub vehicle_profile_table: Option<ProfileTable<'a>>,
+    pub vehicle_movement_profile: Option<ProfileTable<'a>>,
 }
 
 /// The assets a [`DataTables`] borrows, loaded by name.
@@ -90,22 +90,46 @@ impl LoadedDataTables {
         }))
     }
 
-    pub fn tables(&self) -> DataTables<'_> {
+    /// The tables, each prepared once here for every lookup the build makes
+    /// in it.
+    pub fn tables<'a>(&'a self) -> DataTables<'a> {
         let [item_dynamic_data, weapon_dynamic_data, grenade_dynamic_data, melee_dynamic_data, structure_dynamic_data, vehicle_dynamic_data, ship_dynamic_data, ammo_dynamic_data, item_profile_table, structure_profile_table, vehicle_profile_table, vehicle_movement_profile] =
             &self.0;
+        let [item, weapon, grenade, melee, structure, vehicle, ship, ammo, item_profile, structure_profile, vehicle_profile, vehicle_movement] =
+            Self::NAMES;
+        let data_table = |asset: &'a Option<Value>, name| {
+            asset.as_ref().map(|asset| DataTable::new(asset, name))
+        };
+        let profile_table = |asset: &'a Option<Value>, name, map_name| {
+            asset
+                .as_ref()
+                .map(|asset| ProfileTable::new(asset, name, map_name))
+        };
         DataTables {
-            item_dynamic_data: item_dynamic_data.as_ref(),
-            weapon_dynamic_data: weapon_dynamic_data.as_ref(),
-            grenade_dynamic_data: grenade_dynamic_data.as_ref(),
-            melee_dynamic_data: melee_dynamic_data.as_ref(),
-            structure_dynamic_data: structure_dynamic_data.as_ref(),
-            vehicle_dynamic_data: vehicle_dynamic_data.as_ref(),
-            ship_dynamic_data: ship_dynamic_data.as_ref(),
-            ammo_dynamic_data: ammo_dynamic_data.as_ref(),
-            item_profile_table: item_profile_table.as_ref(),
-            structure_profile_table: structure_profile_table.as_ref(),
-            vehicle_profile_table: vehicle_profile_table.as_ref(),
-            vehicle_movement_profile: vehicle_movement_profile.as_ref(),
+            item_dynamic_data: data_table(item_dynamic_data, item),
+            weapon_dynamic_data: data_table(weapon_dynamic_data, weapon),
+            grenade_dynamic_data: data_table(grenade_dynamic_data, grenade),
+            melee_dynamic_data: data_table(melee_dynamic_data, melee),
+            structure_dynamic_data: data_table(structure_dynamic_data, structure),
+            vehicle_dynamic_data: data_table(vehicle_dynamic_data, vehicle),
+            ship_dynamic_data: data_table(ship_dynamic_data, ship),
+            ammo_dynamic_data: data_table(ammo_dynamic_data, ammo),
+            item_profile_table: profile_table(item_profile_table, item_profile, "ItemProfileTable"),
+            structure_profile_table: profile_table(
+                structure_profile_table,
+                structure_profile,
+                "StructureProfileMap",
+            ),
+            vehicle_profile_table: profile_table(
+                vehicle_profile_table,
+                vehicle_profile,
+                "VehicleProfileMap",
+            ),
+            vehicle_movement_profile: profile_table(
+                vehicle_movement_profile,
+                vehicle_movement,
+                "VehicleMovementProfileMap",
+            ),
         }
     }
 }
@@ -297,102 +321,62 @@ pub fn expand_data(
         return;
     }
 
-    let dynamic_data_lookups: [(&str, Option<&Value>, &str); 7] = [
-        (
-            "ItemDynamicData",
-            tables.item_dynamic_data,
-            data_table_lookup::ITEM_DYNAMIC_DATA,
-        ),
-        (
-            "WeaponDynamicData",
-            tables.weapon_dynamic_data,
-            data_table_lookup::WEAPON_DYNAMIC_DATA,
-        ),
-        (
-            "GrenadeDynamicData",
-            tables.grenade_dynamic_data,
-            data_table_lookup::GRENADE_DYNAMIC_DATA,
-        ),
-        (
-            "MeleeDynamicData",
-            tables.melee_dynamic_data,
-            data_table_lookup::MELEE_DYNAMIC_DATA,
-        ),
-        (
-            "StructureDynamicData",
-            tables.structure_dynamic_data,
-            data_table_lookup::STRUCTURE_DYNAMIC_DATA,
-        ),
-        (
-            "VehicleDynamicData",
-            tables.vehicle_dynamic_data,
-            data_table_lookup::VEHICLE_DYNAMIC_DATA,
-        ),
-        (
-            "ShipDynamicData",
-            tables.ship_dynamic_data,
-            data_table_lookup::SHIP_DYNAMIC_DATA,
-        ),
+    let dynamic_data_lookups: [(&str, &Option<DataTable>); 7] = [
+        ("ItemDynamicData", &tables.item_dynamic_data),
+        ("WeaponDynamicData", &tables.weapon_dynamic_data),
+        ("GrenadeDynamicData", &tables.grenade_dynamic_data),
+        ("MeleeDynamicData", &tables.melee_dynamic_data),
+        ("StructureDynamicData", &tables.structure_dynamic_data),
+        ("VehicleDynamicData", &tables.vehicle_dynamic_data),
+        ("ShipDynamicData", &tables.ship_dynamic_data),
     ];
-    for (field_name, asset, table_name) in dynamic_data_lookups {
-        if let Some(asset) = asset {
-            if let Some(row) = data_table_lookup::get(asset, table_name, code_name) {
-                data.insert(field_name.to_string(), clean_data_table_entry(&row));
-            }
+    for (field_name, table) in dynamic_data_lookups {
+        if let Some(row) = table.as_ref().and_then(|table| table.get(code_name)) {
+            data.insert(field_name.to_string(), clean_data_table_entry(&row));
         }
     }
 
     // Ammo data (case-insensitive lookup).
-    if let Some(ammo_asset) = tables.ammo_dynamic_data {
-        if let Some(ammo_data) = data_table_lookup::get_ammo_dynamic_data(ammo_asset, code_name) {
-            data.insert("AmmoDynamicData".to_string(), ammo_data);
-        }
+    if let Some(ammo_data) = tables
+        .ammo_dynamic_data
+        .as_ref()
+        .and_then(|table| table.get_ignoring_case(code_name))
+    {
+        data.insert("AmmoDynamicData".to_string(), ammo_data);
     }
 
     // Profile table lookups by profile type.
-    let profile_lookups: [(&str, &str, Option<&Value>, &str, &str); 4] = [
+    let profile_lookups: [(&str, &str, &Option<ProfileTable>); 4] = [
         (
             "ItemProfileData",
             "ItemProfileType",
-            tables.item_profile_table,
-            data_table_lookup::ITEM_PROFILE_TABLE,
-            "ItemProfileTable",
+            &tables.item_profile_table,
         ),
         (
             "ProfileData",
             "ProfileType",
-            tables.structure_profile_table,
-            data_table_lookup::STRUCTURE_PROFILE_TABLE,
-            "StructureProfileMap",
+            &tables.structure_profile_table,
         ),
         (
             "VehicleProfileData",
             "VehicleProfileType",
-            tables.vehicle_profile_table,
-            data_table_lookup::VEHICLE_PROFILE_TABLE,
-            "VehicleProfileMap",
+            &tables.vehicle_profile_table,
         ),
         (
             "VehicleMovementProfileData",
             "VehicleMovementProfileType",
-            tables.vehicle_movement_profile,
-            data_table_lookup::VEHICLE_MOVEMENT_PROFILE,
-            "VehicleMovementProfileMap",
+            &tables.vehicle_movement_profile,
         ),
     ];
-    for (field_name, type_field, asset, table_name, map_name) in profile_lookups {
+    for (field_name, type_field, table) in profile_lookups {
         let Some(profile_type) = data.get(type_field).and_then(Value::as_str) else {
             continue;
         };
         if profile_type.is_empty() {
             continue;
         }
-        if let Some(asset) = asset {
-            if let Some(profile_data) =
-                data_table_lookup::get_profile(asset, table_name, map_name, profile_type)
-            {
-                data.insert(field_name.to_string(), profile_data);
-            }
+        if let Some(profile_data) = table.as_ref().and_then(|table| table.get(profile_type)) {
+            data.insert(field_name.to_string(), profile_data);
         }
     }
 
@@ -510,15 +494,11 @@ fn resolve_projectile_class(
 /// Add `SubTypeIcon` from `AmmoDynamicData.DamageType.Icon` (in-place), when
 /// applicable, including the hardcoded `ISGTC` case and the mine-detection
 /// exclusion.
-pub fn add_subtype_icon(
-    data: &mut Map<String, Value>,
-    code_name: &str,
-    ammo_dynamic_data_asset: &Value,
-) {
+pub fn add_subtype_icon(data: &mut Map<String, Value>, code_name: &str, ammo_table: &DataTable) {
     if data.get("SubTypeIcon").map(is_truthy).unwrap_or(false) {
         return;
     }
-    if let Some(icon) = subtype_icon(data, code_name, ammo_dynamic_data_asset) {
+    if let Some(icon) = subtype_icon(data, code_name, ammo_table) {
         data.insert("SubTypeIcon".to_string(), icon);
     }
 }
@@ -527,7 +507,7 @@ pub fn add_subtype_icon(
 fn subtype_icon(
     data: &Map<String, Value>,
     code_name: &str,
-    ammo_dynamic_data_asset: &Value,
+    ammo_table: &DataTable,
 ) -> Option<Value> {
     let Some(ammo_data) = data.get("AmmoDynamicData").and_then(Value::as_object) else {
         // HARDCODED: ISGTC has no ammo info in blueprints.
@@ -564,9 +544,7 @@ fn subtype_icon(
     }
 
     // Case 3a: Item's own CodeName has an AmmoDynamicData entry.
-    if !code_name.is_empty()
-        && data_table_lookup::get_ammo_dynamic_data(ammo_dynamic_data_asset, code_name).is_some()
-    {
+    if !code_name.is_empty() && ammo_table.get_ignoring_case(code_name).is_some() {
         return Some(icon.clone());
     }
 
@@ -622,10 +600,16 @@ pub fn assemble_catalog_entry(
     extract_localization_keys(&mut data, ctx.loc_service);
     expand_data(&mut data, &code_name, &ctx.tables, ctx.blueprints);
 
-    let empty_ammo_asset = json!({"imports": [], "exports": []});
-    let ammo_asset = ctx.tables.ammo_dynamic_data.unwrap_or(&empty_ammo_asset);
-    add_ammo_and_damage_type(&mut data, ammo_asset, ctx);
-    add_subtype_icon(&mut data, &code_name, ammo_asset);
+    let empty_ammo_table;
+    let ammo_table = match &ctx.tables.ammo_dynamic_data {
+        Some(table) => table,
+        None => {
+            empty_ammo_table = DataTable::empty(data_table_lookup::AMMO_DYNAMIC_DATA);
+            &empty_ammo_table
+        }
+    };
+    add_ammo_and_damage_type(&mut data, ammo_table, ctx);
+    add_subtype_icon(&mut data, &code_name, ammo_table);
     enrich_locales(&mut data, LOCALIZABLE_FIELDS, ctx.loc_service);
     add_production_categories(&mut data, &code_name, ctx.production_categories);
     add_stockpile_rules(&mut data, category);
@@ -667,16 +651,15 @@ fn extract_localization_keys(data: &mut Map<String, Value>, loc_service: &Locali
 /// index like -25) to the full damage type.
 fn add_ammo_and_damage_type(
     data: &mut Map<String, Value>,
-    ammo_asset: &Value,
+    ammo_table: &DataTable,
     ctx: &AssemblerContext,
 ) {
-    let Some(ammo_code) = damage_type_resolver::get_ammo_code(data, ammo_asset) else {
+    let Some(ammo_code) = damage_type_resolver::get_ammo_code(data, ammo_table) else {
         return;
     };
 
     if !data.contains_key("AmmoDynamicData") {
-        if let Some(ammo_dynamic) = data_table_lookup::get_ammo_dynamic_data(ammo_asset, &ammo_code)
-        {
+        if let Some(ammo_dynamic) = ammo_table.get_ignoring_case(&ammo_code) {
             data.insert(
                 "AmmoDynamicData".to_string(),
                 clean_data_table_entry(&ammo_dynamic),
@@ -692,7 +675,7 @@ fn add_ammo_and_damage_type(
     }
     if let Some(damage_type) = damage_type_resolver::resolve_damage_type(
         &ammo_code,
-        ammo_asset,
+        ammo_table,
         ctx.blueprints,
         ctx.loc_service,
     ) {
@@ -763,27 +746,47 @@ mod tests {
         use data_table_lookup as names;
         let loaded = LoadedDataTables::load(|name| Some(json!(name)));
         let tables = loaded.tables();
+        let data = |table: &Option<DataTable>| table.as_ref().map(DataTable::name);
+        let profile = |table: &Option<ProfileTable>| table.as_ref().map(ProfileTable::name);
         for (table, name) in [
-            (tables.item_dynamic_data, names::ITEM_DYNAMIC_DATA),
-            (tables.weapon_dynamic_data, names::WEAPON_DYNAMIC_DATA),
-            (tables.grenade_dynamic_data, names::GRENADE_DYNAMIC_DATA),
-            (tables.melee_dynamic_data, names::MELEE_DYNAMIC_DATA),
-            (tables.structure_dynamic_data, names::STRUCTURE_DYNAMIC_DATA),
-            (tables.vehicle_dynamic_data, names::VEHICLE_DYNAMIC_DATA),
-            (tables.ship_dynamic_data, names::SHIP_DYNAMIC_DATA),
-            (tables.ammo_dynamic_data, names::AMMO_DYNAMIC_DATA),
-            (tables.item_profile_table, names::ITEM_PROFILE_TABLE),
+            (data(&tables.item_dynamic_data), names::ITEM_DYNAMIC_DATA),
             (
-                tables.structure_profile_table,
+                data(&tables.weapon_dynamic_data),
+                names::WEAPON_DYNAMIC_DATA,
+            ),
+            (
+                data(&tables.grenade_dynamic_data),
+                names::GRENADE_DYNAMIC_DATA,
+            ),
+            (data(&tables.melee_dynamic_data), names::MELEE_DYNAMIC_DATA),
+            (
+                data(&tables.structure_dynamic_data),
+                names::STRUCTURE_DYNAMIC_DATA,
+            ),
+            (
+                data(&tables.vehicle_dynamic_data),
+                names::VEHICLE_DYNAMIC_DATA,
+            ),
+            (data(&tables.ship_dynamic_data), names::SHIP_DYNAMIC_DATA),
+            (data(&tables.ammo_dynamic_data), names::AMMO_DYNAMIC_DATA),
+            (
+                profile(&tables.item_profile_table),
+                names::ITEM_PROFILE_TABLE,
+            ),
+            (
+                profile(&tables.structure_profile_table),
                 names::STRUCTURE_PROFILE_TABLE,
             ),
-            (tables.vehicle_profile_table, names::VEHICLE_PROFILE_TABLE),
             (
-                tables.vehicle_movement_profile,
+                profile(&tables.vehicle_profile_table),
+                names::VEHICLE_PROFILE_TABLE,
+            ),
+            (
+                profile(&tables.vehicle_movement_profile),
                 names::VEHICLE_MOVEMENT_PROFILE,
             ),
         ] {
-            assert_eq!(table, Some(&json!(name)));
+            assert_eq!(table, Some(name));
         }
     }
 
@@ -1087,7 +1090,10 @@ mod tests {
         fn adds_item_dynamic_data() {
             let asset = default_blueprint_asset_for_table("ItemDynamicData", "TestItem");
             let tables = DataTables {
-                item_dynamic_data: Some(&asset),
+                item_dynamic_data: Some(DataTable::new(
+                    &asset,
+                    data_table_lookup::ITEM_DYNAMIC_DATA,
+                )),
                 ..Default::default()
             };
             let mut data = Map::new();
@@ -1111,7 +1117,10 @@ mod tests {
                 }],
             });
             let tables = DataTables {
-                ammo_dynamic_data: Some(&asset),
+                ammo_dynamic_data: Some(DataTable::new(
+                    &asset,
+                    data_table_lookup::AMMO_DYNAMIC_DATA,
+                )),
                 ..Default::default()
             };
             let mut data = Map::new();
@@ -1135,7 +1144,11 @@ mod tests {
                 }],
             });
             let tables = DataTables {
-                item_profile_table: Some(&asset),
+                item_profile_table: Some(ProfileTable::new(
+                    &asset,
+                    data_table_lookup::ITEM_PROFILE_TABLE,
+                    "ItemProfileTable",
+                )),
                 ..Default::default()
             };
             let mut data = Map::new();
@@ -1384,7 +1397,11 @@ mod tests {
                 "AmmoDynamicData".to_string(),
                 json!({"DamageType": {"Icon": "explosion_icon.png"}}),
             );
-            add_subtype_icon(&mut data, "TestAmmo", &ammo_asset);
+            add_subtype_icon(
+                &mut data,
+                "TestAmmo",
+                &DataTable::new(&ammo_asset, data_table_lookup::AMMO_DYNAMIC_DATA),
+            );
             assert_eq!(data["SubTypeIcon"], json!("explosion_icon.png"));
         }
 
@@ -1400,7 +1417,11 @@ mod tests {
                 "ItemComponentClass".to_string(),
                 json!({"ProjectileClass": {"ExplosiveCodeName": "RPGExplosive"}}),
             );
-            add_subtype_icon(&mut data, "RPGLauncher", &empty_ammo_asset());
+            add_subtype_icon(
+                &mut data,
+                "RPGLauncher",
+                &DataTable::new(&empty_ammo_asset(), data_table_lookup::AMMO_DYNAMIC_DATA),
+            );
             assert_eq!(data["SubTypeIcon"], json!("rpg_icon.png"));
         }
 
@@ -1416,7 +1437,11 @@ mod tests {
                 "ItemComponentClass".to_string(),
                 json!({"DeployCodeName": "DeployedTripod"}),
             );
-            add_subtype_icon(&mut data, "TripodWeapon", &empty_ammo_asset());
+            add_subtype_icon(
+                &mut data,
+                "TripodWeapon",
+                &DataTable::new(&empty_ammo_asset(), data_table_lookup::AMMO_DYNAMIC_DATA),
+            );
             assert_eq!(data["SubTypeIcon"], json!("tripod_icon.png"));
         }
 
@@ -1432,7 +1457,11 @@ mod tests {
                 "ItemComponentClass".to_string(),
                 json!({"CompatibleAmmoCodeName": "RifleAmmo"}),
             );
-            add_subtype_icon(&mut data, "Rifle", &empty_ammo_asset());
+            add_subtype_icon(
+                &mut data,
+                "Rifle",
+                &DataTable::new(&empty_ammo_asset(), data_table_lookup::AMMO_DYNAMIC_DATA),
+            );
             assert!(!data.contains_key("SubTypeIcon"));
         }
 
@@ -1440,7 +1469,11 @@ mod tests {
         fn hardcoded_isgtc() {
             let mut data = Map::new();
             data.insert("CodeName".to_string(), json!("ISGTC"));
-            add_subtype_icon(&mut data, "ISGTC", &empty_ammo_asset());
+            add_subtype_icon(
+                &mut data,
+                "ISGTC",
+                &DataTable::new(&empty_ammo_asset(), data_table_lookup::AMMO_DYNAMIC_DATA),
+            );
             assert_eq!(
                 data["SubTypeIcon"],
                 json!("War/Content/Textures/UI/ItemIcons/SubtypeSEIcon.0")
@@ -1451,7 +1484,11 @@ mod tests {
         fn no_ammo_data_adds_nothing() {
             let mut data = Map::new();
             data.insert("CodeName".to_string(), json!("Hammer"));
-            add_subtype_icon(&mut data, "Hammer", &empty_ammo_asset());
+            add_subtype_icon(
+                &mut data,
+                "Hammer",
+                &DataTable::new(&empty_ammo_asset(), data_table_lookup::AMMO_DYNAMIC_DATA),
+            );
             assert!(!data.contains_key("SubTypeIcon"));
         }
 
@@ -1460,7 +1497,11 @@ mod tests {
             let mut data = Map::new();
             data.insert("CodeName".to_string(), json!("TestItem"));
             data.insert("AmmoDynamicData".to_string(), json!({"Damage": 100}));
-            add_subtype_icon(&mut data, "TestItem", &empty_ammo_asset());
+            add_subtype_icon(
+                &mut data,
+                "TestItem",
+                &DataTable::new(&empty_ammo_asset(), data_table_lookup::AMMO_DYNAMIC_DATA),
+            );
             assert!(!data.contains_key("SubTypeIcon"));
         }
 
@@ -1480,7 +1521,11 @@ mod tests {
                 "ItemComponentClass".to_string(),
                 json!({"bAutoActivate": true}),
             );
-            add_subtype_icon(&mut data, "LandMine", &empty_ammo_asset());
+            add_subtype_icon(
+                &mut data,
+                "LandMine",
+                &DataTable::new(&empty_ammo_asset(), data_table_lookup::AMMO_DYNAMIC_DATA),
+            );
             assert!(!data.contains_key("SubTypeIcon"));
         }
     }
@@ -1662,7 +1707,10 @@ mod tests {
             let loc = temp_loc_service();
             let prod_cats = HashMap::new();
             let tables = DataTables {
-                ammo_dynamic_data: Some(&ammo_asset),
+                ammo_dynamic_data: Some(DataTable::new(
+                    &ammo_asset,
+                    data_table_lookup::AMMO_DYNAMIC_DATA,
+                )),
                 ..Default::default()
             };
             let blueprints = Blueprints::new(&no_loader, false);

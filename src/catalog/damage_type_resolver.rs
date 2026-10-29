@@ -12,7 +12,7 @@
 //!
 //! - [`get_ammo_code`] takes the loaded `BPAmmoDynamicData` asset explicitly
 //!   and delegates to
-//!   [`crate::catalog::data_table_lookup::get_ammo_dynamic_data`].
+//!   [`crate::catalog::data_table_lookup::DataTable::get_ignoring_case`].
 //! - [`resolve_damage_type`] passes the resolved `/Game/Blueprints/...`
 //!   object path straight to
 //!   [`crate::catalog::blueprint_parser::Blueprints::extract_path`].
@@ -20,7 +20,7 @@
 use serde_json::{json, Map, Value};
 
 use crate::catalog::blueprint_parser::Blueprints;
-use crate::catalog::data_table_lookup;
+use crate::catalog::data_table_lookup::DataTable;
 use crate::catalog::localization::{self, LocalizationLookup};
 use crate::catalog::utils::{
     blueprint_object_path, extract_localized_text, is_truthy, normalize_object_path,
@@ -30,21 +30,20 @@ use crate::catalog::utils::{
 /// Determine the ammo code for resolving `DamageType`.
 ///
 /// `data` is a blueprint's catalog data dict (e.g. from
-/// `blueprint_parser::extract_catalog_data`). `ammo_dynamic_data_asset` is
-/// the already-loaded `BPAmmoDynamicData` asset (in `uasset_to_full_json`
-/// shape), used to check "is this item itself an ammo type" via
-/// [`data_table_lookup::get_ammo_dynamic_data`].
+/// `blueprint_parser::extract_catalog_data`). `ammo_table` is the
+/// `BPAmmoDynamicData` table, used to check "is this item itself an ammo
+/// type" via [`DataTable::get_ignoring_case`].
 ///
 /// Cases are checked in this order:
 /// 1. The item's own `CodeName` has an `AmmoDynamicData` entry.
 /// 2. A single-entry `MultiAmmo` list.
 /// 3. `CompatibleAmmoCodeName`.
 /// 4. `ProjectileClass.ExplosiveCodeName`.
-pub fn get_ammo_code(data: &Map<String, Value>, ammo_dynamic_data_asset: &Value) -> Option<String> {
+pub fn get_ammo_code(data: &Map<String, Value>, ammo_table: &DataTable) -> Option<String> {
     let code_name = data.get("CodeName").and_then(Value::as_str).unwrap_or("");
 
     // Case 1: Item itself is ammo (has AmmoDynamicData entry).
-    if data_table_lookup::get_ammo_dynamic_data(ammo_dynamic_data_asset, code_name).is_some() {
+    if ammo_table.get_ignoring_case(code_name).is_some() {
         return Some(code_name.to_string());
     }
 
@@ -253,10 +252,9 @@ pub fn build_damage_type_result(
 /// Resolve `DamageType` import reference to a full object.
 ///
 /// `ammo_code` is the ammo `CodeName` to resolve `DamageType` for.
-/// `ammo_asset` is the already-loaded `BPAmmoDynamicData` asset used both to
-/// resolve the `DamageType` import (via
-/// [`data_table_lookup::resolve_damage_type_import`]) and — like that
-/// function — as the source of `imports` for resolution. The `DamageType`
+/// `ammo_table` is the `BPAmmoDynamicData` table the `DamageType` import is
+/// resolved through (see [`DataTable::resolve_damage_type_import`]). The
+/// `DamageType`
 /// blueprint is extracted from `blueprints` by its `/Game/Blueprints/...`
 /// object path, mirroring `blueprint_parser::filesystem_loader`'s convention.
 ///
@@ -265,12 +263,12 @@ pub fn build_damage_type_result(
 /// applied before loading.
 pub fn resolve_damage_type(
     ammo_code: &str,
-    ammo_asset: &Value,
+    ammo_table: &DataTable,
     blueprints: &Blueprints,
     loc_service: &LocalizationLookup,
 ) -> Option<Value> {
     // Get the damage type path from the ammo data table.
-    let damage_type_path = data_table_lookup::resolve_damage_type_import(ammo_asset, ammo_code)?;
+    let damage_type_path = ammo_table.resolve_damage_type_import(ammo_code)?;
 
     // Handle Script paths (C++ classes) - return as Type field.
     if let Some(_rest) = damage_type_path.strip_prefix("/Script/") {
@@ -304,6 +302,7 @@ pub fn resolve_damage_type(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::data_table_lookup::AMMO_DYNAMIC_DATA;
     use std::collections::HashMap;
 
     fn ammo_asset(rows: Value) -> Value {
@@ -337,7 +336,10 @@ mod tests {
         use super::*;
 
         fn ammo_code(data: &Value, ammo: &Value) -> Option<String> {
-            get_ammo_code(data.as_object().unwrap(), ammo)
+            get_ammo_code(
+                data.as_object().unwrap(),
+                &DataTable::new(ammo, AMMO_DYNAMIC_DATA),
+            )
         }
 
         #[test]
@@ -645,7 +647,7 @@ mod tests {
             let loc = loc_service();
             let result = resolve_damage_type(
                 "RifleAmmo",
-                &ammo,
+                &DataTable::new(&ammo, AMMO_DYNAMIC_DATA),
                 &Blueprints::new(&no_loader, false),
                 &loc,
             );
@@ -672,7 +674,7 @@ mod tests {
             let loc = loc_service();
             let result = resolve_damage_type(
                 "RifleAmmo",
-                &ammo,
+                &DataTable::new(&ammo, AMMO_DYNAMIC_DATA),
                 &Blueprints::new(&no_loader, false),
                 &loc,
             );
@@ -699,7 +701,7 @@ mod tests {
             let loc = loc_service();
             let result = resolve_damage_type(
                 "RifleAmmo",
-                &ammo,
+                &DataTable::new(&ammo, AMMO_DYNAMIC_DATA),
                 &Blueprints::new(&no_loader, false),
                 &loc,
             );
@@ -743,9 +745,13 @@ mod tests {
             let loader = map_loader(assets);
 
             let loc = loc_service();
-            let result =
-                resolve_damage_type("RifleAmmo", &ammo, &Blueprints::new(&loader, false), &loc)
-                    .unwrap();
+            let result = resolve_damage_type(
+                "RifleAmmo",
+                &DataTable::new(&ammo, AMMO_DYNAMIC_DATA),
+                &Blueprints::new(&loader, false),
+                &loc,
+            )
+            .unwrap();
             assert_eq!(result["Type"], json!("Kinetic"));
             assert_eq!(
                 result["ObjectPath"],
@@ -791,9 +797,13 @@ mod tests {
             let loader = map_loader(assets);
 
             let loc = loc_service();
-            let result =
-                resolve_damage_type("RifleAmmo", &ammo, &Blueprints::new(&loader, false), &loc)
-                    .unwrap();
+            let result = resolve_damage_type(
+                "RifleAmmo",
+                &DataTable::new(&ammo, AMMO_DYNAMIC_DATA),
+                &Blueprints::new(&loader, false),
+                &loc,
+            )
+            .unwrap();
             assert_eq!(result["Type"], json!("Kinetic"));
         }
 
@@ -833,9 +843,13 @@ mod tests {
             let loader = map_loader(assets);
 
             let loc = loc_service();
-            let result =
-                resolve_damage_type("ClusterAmmo", &ammo, &Blueprints::new(&loader, false), &loc)
-                    .unwrap();
+            let result = resolve_damage_type(
+                "ClusterAmmo",
+                &DataTable::new(&ammo, AMMO_DYNAMIC_DATA),
+                &Blueprints::new(&loader, false),
+                &loc,
+            )
+            .unwrap();
             assert_eq!(result["Type"], json!("Shrapnel"));
         }
     }

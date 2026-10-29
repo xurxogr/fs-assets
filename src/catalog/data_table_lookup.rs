@@ -22,10 +22,11 @@
 //!
 //! `ObjectProperty` values show up as the `"Reference: N"` sentinel string
 //! described in `convert::property_to_value`. Row and profile lookups
-//! ([`get`], [`get_profile`]) resolve import references to asset paths (e.g.
-//! the curve assets in `BPVehicleMovementProfileList`) and drop null ones;
-//! [`get_ammo_dynamic_data`] keeps them raw because `DamageType` is resolved
-//! separately by [`resolve_damage_type_import`].
+//! ([`DataTable::get`], [`ProfileTable::get`]) resolve import references to
+//! asset paths (e.g. the curve assets in `BPVehicleMovementProfileList`) and
+//! drop null ones; [`DataTable::get_ignoring_case`] keeps them raw because
+//! `DamageType` is resolved separately by
+//! [`DataTable::resolve_damage_type_import`].
 //!
 //! Assets are loaded through a [`crate::catalog::blueprint_parser::AssetLoader`]
 //! closure keyed by whatever name identifies them to the caller (a data
@@ -97,25 +98,144 @@ fn with_object_path(row: &Value, table_name: &str) -> Value {
     Value::Object(map)
 }
 
-/// Look up a row by exact `CodeName` in a data table asset. Returns `None`
-/// if `asset` has no `data_table`-kind export, or the export has no such row.
-pub fn get(asset: &Value, table_name: &str, key: &str) -> Option<Value> {
-    let row = find_data_table_export(asset)?.get("rows")?.get(key)?;
-    Some(with_object_path(
-        &resolve_references(row, &asset_imports(asset)),
-        table_name,
-    ))
+/// A data table asset prepared once for every lookup a catalog build makes
+/// in it: its rows, its imports in the shape import resolution reads, and its
+/// row names by lowercase for [`Self::get_ignoring_case`].
+pub struct DataTable<'a> {
+    name: &'static str,
+    rows: Option<&'a Map<String, Value>>,
+    imports: Vec<Value>,
+    /// The first row name (in row order) of each lowercased one.
+    by_lowercase: HashMap<String, &'a str>,
 }
 
-/// Look up a value from a "profile table": a plain blueprint's `Default__`
-/// export with a `Map`-typed property (see module docs). `map_name` is the
-/// name of that Map property (e.g. `"ItemProfileTable"`).
-pub fn get_profile(asset: &Value, table_name: &str, map_name: &str, key: &str) -> Option<Value> {
-    let table = parse_profile_table(asset, map_name);
-    let imports = asset_imports(asset);
-    table
-        .get(key)
-        .map(|v| with_object_path(&resolve_references(v, &imports), table_name))
+impl<'a> DataTable<'a> {
+    /// `asset`, the data table named `name`: rows come from its
+    /// `data_table`-kind export (none without one).
+    pub fn new(asset: &'a Value, name: &'static str) -> Self {
+        let rows = find_data_table_export(asset)
+            .and_then(|export| export.get("rows"))
+            .and_then(Value::as_object);
+        let mut by_lowercase = HashMap::new();
+        for key in rows.into_iter().flat_map(Map::keys) {
+            by_lowercase
+                .entry(key.to_lowercase())
+                .or_insert(key.as_str());
+        }
+        Self {
+            name,
+            rows,
+            imports: asset_imports(asset),
+            by_lowercase,
+        }
+    }
+
+    /// The table named `name` with no rows, for a table that wasn't found.
+    pub fn empty(name: &'static str) -> Self {
+        Self {
+            name,
+            rows: None,
+            imports: Vec::new(),
+            by_lowercase: HashMap::new(),
+        }
+    }
+
+    /// The table's name, e.g. [`AMMO_DYNAMIC_DATA`].
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// The row whose `CodeName` is exactly `key`, with its import references
+    /// resolved and `ObjectPath` added.
+    pub fn get(&self, key: &str) -> Option<Value> {
+        let row = self.rows?.get(key)?;
+        Some(with_object_path(
+            &resolve_references(row, &self.imports),
+            self.name,
+        ))
+    }
+
+    /// The row for `code_name` matched case-insensitively (component
+    /// blueprints may use different casing than the data table, e.g.
+    /// `RPGAmmo` vs `RpgAmmo`), an exact match first, with `ObjectPath`
+    /// added. References are kept raw: `DamageType` is resolved separately by
+    /// [`Self::resolve_damage_type_import`].
+    pub fn get_ignoring_case(&self, code_name: &str) -> Option<Value> {
+        if code_name.is_empty() {
+            return None;
+        }
+        let rows = self.rows?;
+        let row = rows.get(code_name).or_else(|| {
+            let key = self.by_lowercase.get(&code_name.to_lowercase())?;
+            rows.get(*key)
+        })?;
+        Some(with_object_path(row, self.name))
+    }
+
+    /// The blueprint path the `DamageType` import reference of
+    /// `code_name`'s row (see [`Self::get_ignoring_case`]) points at.
+    pub fn resolve_damage_type_import(&self, code_name: &str) -> Option<String> {
+        let row = self.get_ignoring_case(code_name)?;
+        let ref_idx = parse_reference(row.get("DamageType")?.as_str()?)?;
+        if ref_idx >= 0 {
+            return None;
+        }
+        resolve_import_path(ref_idx, &self.imports)
+    }
+}
+
+/// A "profile table" prepared once for every lookup in it: a plain
+/// blueprint's `Default__` export with a `Map`-typed property (see module
+/// docs), which `convert::property_to_value`'s `MapProperty` arm has already
+/// reduced to `[[key, value], ...]` pairs with both sides fully processed.
+pub struct ProfileTable<'a> {
+    name: &'static str,
+    entries: HashMap<String, &'a Value>,
+    imports: Vec<Value>,
+}
+
+impl<'a> ProfileTable<'a> {
+    /// `asset`, the profile table named `name`, whose Map property is
+    /// `map_name` (e.g. `"ItemProfileTable"`). An entry that isn't a pair
+    /// with a non-empty string key is skipped; a later entry with the same
+    /// key replaces an earlier one.
+    pub fn new(asset: &'a Value, name: &'static str, map_name: &str) -> Self {
+        let pairs = find_default_export(asset)
+            .and_then(|export| export.get("properties"))
+            .and_then(|props| props.get(map_name))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_array);
+        let mut entries = HashMap::new();
+        for pair in pairs {
+            if let [Value::String(key), value] = pair.as_slice() {
+                if !key.is_empty() {
+                    entries.insert(key.clone(), value);
+                }
+            }
+        }
+        Self {
+            name,
+            entries,
+            imports: asset_imports(asset),
+        }
+    }
+
+    /// The table's name, e.g. [`ITEM_PROFILE_TABLE`].
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// The value for `key`, with its import references resolved and
+    /// `ObjectPath` added.
+    pub fn get(&self, key: &str) -> Option<Value> {
+        let value = self.entries.get(key)?;
+        Some(with_object_path(
+            &resolve_references(value, &self.imports),
+            self.name,
+        ))
+    }
 }
 
 /// The asset's imports, adapted to the PascalCase shape the import
@@ -172,83 +292,6 @@ fn resolve_reference_value(value: &Value, imports: &[Value]) -> Option<Value> {
     let path =
         import_at(index, imports).and_then(|import| resolve_import_asset_path(import, imports));
     Some(path.map(Value::String).unwrap_or_else(|| value.clone()))
-}
-
-/// Parse a profile table's Map property into a `key -> processed value`
-/// dict. `convert::property_to_value`'s `MapProperty` arm has already
-/// reduced the Map to `[[key, value], ...]` pairs with both sides fully
-/// processed, so this only collects them.
-pub fn parse_profile_table(asset: &Value, map_name: &str) -> HashMap<String, Value> {
-    let mut result = HashMap::new();
-
-    let Some(export) = find_default_export(asset) else {
-        return result;
-    };
-    let Some(props) = export.get("properties").and_then(Value::as_object) else {
-        return result;
-    };
-    let Some(map_value) = props.get(map_name).and_then(Value::as_array) else {
-        return result;
-    };
-
-    for entry in map_value {
-        let Some(pair) = entry.as_array() else {
-            continue;
-        };
-        if pair.len() != 2 {
-            continue;
-        }
-        let key = match &pair[0] {
-            Value::String(s) if !s.is_empty() => s.clone(),
-            _ => continue,
-        };
-        result.insert(key, pair[1].clone());
-    }
-
-    result
-}
-
-/// Get `AmmoDynamicData` for an ammo type by `CodeName`, case-insensitively
-/// (component blueprints may use different casing than the data table,
-/// e.g. `RPGAmmo` vs `RpgAmmo`). An exact match is preferred over a
-/// case-insensitive one.
-pub fn get_ammo_dynamic_data(asset: &Value, code_name: &str) -> Option<Value> {
-    if code_name.is_empty() {
-        return None;
-    }
-
-    let rows = find_data_table_export(asset)?.get("rows")?.as_object()?;
-
-    if let Some(row) = rows.get(code_name) {
-        return Some(with_object_path(row, AMMO_DYNAMIC_DATA));
-    }
-
-    let lower = code_name.to_lowercase();
-    for (k, v) in rows {
-        if k.to_lowercase() == lower {
-            return Some(with_object_path(v, AMMO_DYNAMIC_DATA));
-        }
-    }
-
-    None
-}
-
-/// Resolve a `DamageType` import reference for an ammo type to its
-/// blueprint path. `ammo_asset` is the already-loaded `BPAmmoDynamicData`
-/// asset (in `uasset_to_full_json` shape) — its own `imports` array is used
-/// for resolution.
-pub fn resolve_damage_type_import(ammo_asset: &Value, code_name: &str) -> Option<String> {
-    let ammo_data = get_ammo_dynamic_data(ammo_asset, code_name)?;
-
-    let damage_type_ref = ammo_data.get("DamageType")?.as_str()?;
-    let ref_idx = parse_reference(damage_type_ref)?;
-    if ref_idx >= 0 {
-        return None;
-    }
-
-    let imports = ammo_asset.get("imports")?.as_array()?;
-    let adapted: Vec<Value> = imports.iter().map(to_pascalcase_import).collect();
-    resolve_import_path(ref_idx, &adapted)
 }
 
 // ---------------------------------------------------------------------
@@ -384,6 +427,27 @@ pub fn filesystem_blueprint_loader(blueprints_dir: &Path) -> impl Fn(&str) -> Op
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn get(asset: &Value, table_name: &'static str, key: &str) -> Option<Value> {
+        DataTable::new(asset, table_name).get(key)
+    }
+
+    fn get_profile(
+        asset: &Value,
+        table_name: &'static str,
+        map_name: &str,
+        key: &str,
+    ) -> Option<Value> {
+        ProfileTable::new(asset, table_name, map_name).get(key)
+    }
+
+    fn get_ammo_dynamic_data(asset: &Value, code_name: &str) -> Option<Value> {
+        DataTable::new(asset, AMMO_DYNAMIC_DATA).get_ignoring_case(code_name)
+    }
+
+    fn resolve_damage_type_import(asset: &Value, code_name: &str) -> Option<String> {
+        DataTable::new(asset, AMMO_DYNAMIC_DATA).resolve_damage_type_import(code_name)
+    }
 
     #[test]
     fn a_null_reference_in_a_map_pair_keeps_its_place() {
