@@ -169,6 +169,15 @@ pub fn read_database_or_empty(path: &Path) -> anyhow::Result<BTreeMap<i32, Vec<I
 /// another [`DATABASE_VERSION`], or with a member other than the supported
 /// resolution groups, which the rewrite would silently drop.
 pub fn read_database(path: &Path) -> anyhow::Result<BTreeMap<i32, Vec<IconTemplate>>> {
+    read_database_within(path, MAX_DATABASE_IMAGE_BYTES)
+}
+
+/// [`read_database`], refusing a database with over `max_image_bytes` of
+/// template images in all.
+fn read_database_within(
+    path: &Path,
+    max_image_bytes: usize,
+) -> anyhow::Result<BTreeMap<i32, Vec<IconTemplate>>> {
     let file = hdf5::File::open(path)?;
     check_version(&file.attr("version")?, "the database")?;
     let supported: Vec<String> = crate::database::SUPPORTED_RESOLUTIONS
@@ -186,12 +195,22 @@ pub fn read_database(path: &Path) -> anyhow::Result<BTreeMap<i32, Vec<IconTempla
         );
     }
     let mut resolutions = BTreeMap::new();
+    let mut image_bytes = 0usize;
 
     for &resolution in &crate::database::SUPPORTED_RESOLUTIONS {
         let Ok(group) = file.group(&resolution.to_string()) else {
             resolutions.insert(resolution, Vec::new());
             continue;
         };
+        // Every group is held at once, so the per-group cap alone would
+        // still let 16 full groups add up to gigabytes.
+        image_bytes += template_count(&group, resolution)? * image_len(resolution);
+        if image_bytes > max_image_bytes {
+            anyhow::bail!(
+                "{} holds over {max_image_bytes} bytes of images",
+                path.display()
+            );
+        }
         resolutions.insert(resolution, read_group(&group, resolution)?);
     }
 
@@ -255,6 +274,17 @@ pub fn read_statistics(path: &Path) -> anyhow::Result<DatabaseStatistics> {
 /// keeping a hostile count from sizing gigabytes of reads.
 const MAX_TEMPLATES_PER_GROUP: usize = 50_000;
 
+/// Largest total of template images [`read_database`] holds, over every
+/// group: the base game's are ~42 MB, so this too leaves room for dozens of
+/// mods.
+const MAX_DATABASE_IMAGE_BYTES: usize = 2 << 30;
+
+/// Bytes of one template image at `resolution`.
+fn image_len(resolution: i32) -> usize {
+    let icon_size = crate::database::icon_size_for_resolution(resolution) as usize;
+    icon_size * icon_size * 3
+}
+
 /// Fails unless the `version` attribute `attr` of `what` is [`DATABASE_VERSION`].
 fn check_version(attr: &hdf5::Attribute, what: &str) -> anyhow::Result<()> {
     let version: i64 = attr.read_scalar()?;
@@ -314,7 +344,7 @@ fn read_group(group: &hdf5::Group, resolution: i32) -> anyhow::Result<Vec<IconTe
         return Ok(Vec::new());
     }
     let icon_size = crate::database::icon_size_for_resolution(resolution) as usize;
-    let image_len = icon_size * icon_size * 3;
+    let image_len = image_len(resolution);
 
     let column = |name: &str| sized_dataset(group, resolution, name, &[n]);
     let images: Vec<u8> =
@@ -607,6 +637,19 @@ mod tests {
             let err = read_database(&path).unwrap_err();
             assert!(err.to_string().contains("version 1, expected 2"), "{err}");
         }
+    }
+
+    #[test]
+    fn caps_the_images_held_over_every_group() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("db.h5");
+        write_two_mod_database(&path);
+        // Three 1080p templates and one 1440p one.
+        let total = 3 * image_len(1080) + image_len(1440);
+
+        assert!(read_database_within(&path, total).is_ok());
+        let err = read_database_within(&path, total - 1).unwrap_err();
+        assert!(err.to_string().contains("bytes of images"), "{err}");
     }
 
     #[test]
