@@ -2,6 +2,8 @@
 name = "fs-assets"
 version = "0.1.1"
 edition = "2021"
+# The oldest compiler that builds it (`File::try_lock`), checked with `cargo +1.89 check`.
+rust-version = "1.89"
 description = "Foxhole game asset tools: pak extraction, item catalog and icon-template database"
 license = "MIT"
 authors = ["Jorge García"]
