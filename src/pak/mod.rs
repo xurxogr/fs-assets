@@ -347,9 +347,10 @@ impl From<PakVersion> for repak::Version {
 /// `"../../../"` and `Version::V8B`, the values of the game's own
 /// `War-WindowsNoEditor.pak`. Returns every packed file's path, relative to
 /// `input_dir` with `/` separators, sorted for stable output. A directory
-/// that can't be read (or a missing `input_dir`), or a file name that isn't
-/// UTF-8 (pak paths are text), fails the whole pack before `output` is
-/// touched, rather than producing a pak missing or misnaming its files.
+/// that can't be read (or an `input_dir` that is missing or not a
+/// directory), a symlink under it, or a file name that isn't UTF-8 (pak
+/// paths are text), fails the whole pack before `output` is touched, rather
+/// than producing a pak missing or misnaming its files.
 ///
 /// The pak is written to a temporary file next to `output` and renamed over
 /// it only once complete, so a failed pack leaves an existing `output` as it
@@ -375,12 +376,24 @@ pub fn pack_with_progress(
     version: repak::Version,
     progress: &dyn Fn(usize, usize) -> anyhow::Result<()>,
 ) -> anyhow::Result<Vec<String>> {
+    // A file would be walked as its own only entry, with an empty path.
+    if !input_dir.is_dir() {
+        anyhow::bail!("{} is not a directory", input_dir.display());
+    }
     let output_file = output.canonicalize().ok();
     let mut files = Vec::new();
     // Sorted, so the same directory packs to the same bytes whatever order
     // the filesystem lists it in.
     for entry in walkdir::WalkDir::new(input_dir).sort_by_file_name() {
         let entry = entry?;
+        // Not followed (a link could lead out of the tree or loop), and not
+        // dropped from the pak silently either.
+        if entry.path_is_symlink() && entry.depth() > 0 {
+            anyhow::bail!(
+                "{} is a symlink; pack only takes regular files",
+                entry.path().display()
+            );
+        }
         if !entry.file_type().is_file()
             || output_file.is_some() && entry.path().canonicalize().ok() == output_file
         {
@@ -925,6 +938,43 @@ mod tests {
         )
         .is_err());
         assert!(!pak_path.exists());
+    }
+
+    #[test]
+    fn packing_a_file_instead_of_a_directory_fails_without_writing_a_pak() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("a.txt");
+        fs::write(&input, b"hello").unwrap();
+        let pak_path = tmp.path().join("out.pak");
+
+        let err = pack(&input, &pak_path, "../../../", repak::Version::V8B).unwrap_err();
+
+        assert!(err.to_string().contains("not a directory"), "{err}");
+        assert!(!pak_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_under_the_input_dir_fails_the_pack() {
+        for target_is_dir in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let target = tmp.path().join("outside");
+            if target_is_dir {
+                fs::create_dir_all(&target).unwrap();
+            } else {
+                fs::write(&target, b"secret").unwrap();
+            }
+            let input_dir = tmp.path().join("mod");
+            fs::create_dir_all(&input_dir).unwrap();
+            fs::write(input_dir.join("a.txt"), b"hello").unwrap();
+            std::os::unix::fs::symlink(&target, input_dir.join("link")).unwrap();
+            let pak_path = tmp.path().join("out.pak");
+
+            let err = pack(&input_dir, &pak_path, "../../../", repak::Version::V8B).unwrap_err();
+
+            assert!(err.to_string().contains("is a symlink"), "{err}");
+            assert!(!pak_path.exists());
+        }
     }
 
     #[test]
