@@ -87,7 +87,8 @@ fn read_bytes<R: Read>(r: &mut R, len: usize) -> io::Result<Vec<u8>> {
 }
 
 /// Read a UE4 `FString`: `i32` length prefix, empty/UTF-16/Latin-1 body per
-/// the sign of the length, trailing NUL stripped. Truncation is an error:
+/// the sign of the length, its NUL terminator stripped (only that one, so a
+/// NUL that is part of the text survives a round trip). Truncation is an error:
 /// this reader is meant to faithfully round-trip real files, not to shrug
 /// off malformed ones.
 fn read_fstring<R: Read>(r: &mut R) -> io::Result<String> {
@@ -105,12 +106,12 @@ fn read_fstring<R: Read>(r: &mut R) -> io::Result<String> {
             .iter()
             .map(|&pair| u16::from_le_bytes(pair))
             .collect();
-        let s = String::from_utf16_lossy(&units);
-        Ok(s.trim_end_matches('\0').to_string())
+        let units = units.strip_suffix(&[0]).unwrap_or(&units);
+        Ok(String::from_utf16_lossy(units))
     } else {
         let data = read_bytes(r, length as usize)?;
-        let s: String = data.iter().map(|&b| b as char).collect();
-        Ok(s.trim_end_matches('\0').to_string())
+        let data = data.strip_suffix(&[0]).unwrap_or(&data);
+        Ok(data.iter().map(|&b| b as char).collect())
     }
 }
 
@@ -690,6 +691,19 @@ mod tests {
             assert_eq!(buf.len(), 4 + 9 * 2);
             let e_bytes = &buf[4 + 2 * 2..4 + 3 * 2];
             assert_eq!(e_bytes, &[0xC9, 0x00]);
+        }
+
+        #[test]
+        fn strips_only_the_terminator_so_trailing_nuls_round_trip() {
+            for text in ["a\0", "a\0\0", "ñ\0", "\0"] {
+                let mut buf = Vec::new();
+                write_fstring(&mut buf, text).unwrap();
+                assert_eq!(read_fstring(&mut buf.as_slice()).unwrap(), text, "{text:?}");
+            }
+            // A string stored without its terminator keeps all its text.
+            let mut unterminated = 2i32.to_le_bytes().to_vec();
+            unterminated.extend_from_slice(b"ab");
+            assert_eq!(read_fstring(&mut unterminated.as_slice()).unwrap(), "ab");
         }
 
         #[test]
