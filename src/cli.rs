@@ -276,13 +276,35 @@ impl log::Log for StderrLogger {
 /// unwinds normally so their temporary files are removed.
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
-/// Whether the running command checks [`INTERRUPTED`]; the short ones don't.
+/// Whether the running command writes files, so a first Ctrl-C mustn't exit
+/// in the middle of it (see [`defers_interrupts`]).
 static INTERRUPTIBLE: AtomicBool = AtomicBool::new(false);
+
+/// Whether `command` writes files. The long ones check [`INTERRUPTED`] and
+/// stop at their next progress report; the short ones (`modify-icon`,
+/// `convert`, the locres ones) never check it, so they just finish, but a
+/// Ctrl-C still can't kill them halfway through and leave their temporary
+/// file behind. Read-only commands exit at once.
+fn defers_interrupts(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::Unpak { .. }
+            | Commands::BuildCatalog { .. }
+            | Commands::AddMod { .. }
+            | Commands::ExtractIcons { .. }
+            | Commands::Pack { .. }
+            | Commands::GrepStrings { .. }
+            | Commands::Convert { .. }
+            | Commands::ModifyIcon { .. }
+            | Commands::LocresDump { .. }
+            | Commands::LocresPack { .. }
+    )
+}
 
 /// What the binary's Ctrl-C handler calls (see `main.rs`). Asks the running
 /// command to stop at its next progress report and returns `false`, or
 /// returns `true` when the process should exit at once instead: on a second
-/// Ctrl-C, or while running a command that never reports progress.
+/// Ctrl-C, or while running a read-only command (one that writes no file).
 pub fn request_interrupt() -> bool {
     !INTERRUPTIBLE.load(Ordering::Relaxed) || INTERRUPTED.swap(true, Ordering::Relaxed)
 }
@@ -347,18 +369,7 @@ where
             return e.exit_code();
         }
     };
-    INTERRUPTIBLE.store(
-        matches!(
-            cli.command,
-            Commands::Unpak { .. }
-                | Commands::BuildCatalog { .. }
-                | Commands::AddMod { .. }
-                | Commands::ExtractIcons { .. }
-                | Commands::Pack { .. }
-                | Commands::GrepStrings { .. }
-        ),
-        Ordering::Relaxed,
-    );
+    INTERRUPTIBLE.store(defers_interrupts(&cli.command), Ordering::Relaxed);
     exit_code(run_command(cli.command, check_interrupted))
 }
 
@@ -850,6 +861,31 @@ mod tests {
             .unwrap(),
             Some(AssetSource::Pak(vec!["War.pak".into()]))
         );
+    }
+
+    #[test]
+    fn commands_that_write_files_defer_a_first_interrupt() {
+        let defers = |args: &[&str]| defers_interrupts(&parse(args).unwrap().command);
+        let identity = [
+            "--code",
+            "Rifle",
+            "--faction",
+            "neutral",
+            "--category",
+            "item",
+        ];
+        assert!(defers(
+            &[&["modify-icon"][..], &identity, &["--remove"]].concat()
+        ));
+        assert!(defers(&["locres-pack", "in.json", "-o", "out.locres"]));
+        assert!(defers(&["locres-dump", "in.locres", "-o", "out.json"]));
+        assert!(!defers(&[
+            "check-paks",
+            "--catalog",
+            "catalog.json",
+            "--pak",
+            "a.pak"
+        ]));
     }
 
     #[test]
