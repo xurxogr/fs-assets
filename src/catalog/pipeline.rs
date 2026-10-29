@@ -54,9 +54,11 @@ pub fn collect_blueprint_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     if !dir.exists() {
         return Ok(Vec::new());
     }
-    // `walkdir` doesn't follow symlinks (so a link back up the tree can't
-    // loop) and walks without recursing.
+    // Symlinks aren't followed, `dir` itself included (walkdir follows a
+    // linked root by default), so a link can neither loop back up the tree
+    // nor lead out of it; the walk doesn't recurse either.
     let mut results: Vec<PathBuf> = walkdir::WalkDir::new(dir)
+        .follow_root_links(false)
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
@@ -227,6 +229,21 @@ pub fn build_catalog_from_extract_dir_with_progress(
             anyhow::bail!("{name} is not a directory: {}", path.display());
         }
     }
+    // The loaders only refuse links below these directories, and the
+    // blueprint walk reads whatever a linked search directory points to, so
+    // a link on the way to any of them (`War`, `Content`…) is refused here.
+    let search_dirs: Vec<PathBuf> = SEARCH_DIRECTORIES
+        .iter()
+        .map(|dir| blueprints_dir.join(dir))
+        .collect();
+    for path in [&blueprints_dir, &data_dir, &localization_dir]
+        .into_iter()
+        .chain(&search_dirs)
+    {
+        if crate::pak::has_symlink_below(extract_dir, path) {
+            anyhow::bail!("{} is reached through a symlink", path.display());
+        }
+    }
 
     let loc_service = LocalizationLookup::new(&localization_dir, None);
 
@@ -255,8 +272,8 @@ pub fn build_catalog_from_extract_dir_with_progress(
     };
 
     let mut files = Vec::new();
-    for search_dir in SEARCH_DIRECTORIES {
-        files.extend(collect_blueprint_files(&blueprints_dir.join(search_dir))?);
+    for search_dir in &search_dirs {
+        files.extend(collect_blueprint_files(search_dir)?);
     }
 
     let mut stats = CatalogStats {
@@ -408,6 +425,20 @@ mod tests {
             assert_eq!(files, vec![tmp.path().join("Sub/Rifle.uasset")]);
         }
 
+        #[cfg(unix)]
+        #[test]
+        fn does_not_follow_a_linked_root() {
+            let tmp = tempfile::tempdir().unwrap();
+            touch(&tmp.path().join("outside/Rifle.uasset"));
+            let root = tmp.path().join("ItemPickups");
+            std::os::unix::fs::symlink(tmp.path().join("outside"), &root).unwrap();
+
+            assert_eq!(
+                collect_blueprint_files(&root).unwrap(),
+                Vec::<PathBuf>::new()
+            );
+        }
+
         #[test]
         fn missing_directory_returns_empty() {
             let tmp = tempfile::tempdir().unwrap();
@@ -458,6 +489,42 @@ mod tests {
             fs::create_dir_all(tmp.path().join("War/Content/Blueprints")).unwrap();
             let err = build_catalog_from_extract_dir(tmp.path()).unwrap_err();
             assert!(err.to_string().contains("Data"));
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn refuses_required_and_search_directories_reached_through_a_symlink() {
+            for linked in [
+                "War",
+                "War/Content/Localization",
+                "War/Content/Blueprints/Vehicles",
+            ] {
+                let tmp = tempfile::tempdir().unwrap();
+                let extract = tmp.path().join("extract");
+                let outside = tmp.path().join("outside");
+                for dir in [
+                    "Blueprints/Data/x",
+                    "Localization/x",
+                    "Blueprints/Vehicles/x",
+                ] {
+                    fs::create_dir_all(outside.join("War/Content").join(dir)).unwrap();
+                }
+                // `linked` is a link to its counterpart under `outside`; the
+                // rest of the tree is real.
+                let link = extract.join(linked);
+                fs::create_dir_all(link.parent().unwrap()).unwrap();
+                std::os::unix::fs::symlink(outside.join(linked), &link).unwrap();
+                for dir in ["Blueprints/Data", "Localization"] {
+                    let _ = fs::create_dir_all(extract.join("War/Content").join(dir));
+                }
+
+                let err = build_catalog_from_extract_dir(&extract).unwrap_err();
+
+                assert!(
+                    err.to_string().contains("through a symlink"),
+                    "{linked}: {err}"
+                );
+            }
         }
 
         #[test]
