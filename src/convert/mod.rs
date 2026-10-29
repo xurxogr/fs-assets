@@ -346,9 +346,8 @@ const MIN_PNG_LEN: usize = PNG_MAGIC.len() + 25 + 12;
 /// The PNG whose signature is at `sig_offset` in `file_bytes`, if the
 /// `[W, H, Len]` header before it is consistent with it (see
 /// [`uasset_to_png`]): `Len` bytes from the signature end with `IEND`, and
-/// `W`/`H` match the PNG's own IHDR size and are within
-/// [`MAX_TEXTURE_DIMENSION`].
-fn embedded_png_at(file_bytes: &[u8], sig_offset: usize) -> Option<&[u8]> {
+/// `W`/`H` match the PNG's own IHDR size and are at most `max_side`.
+fn embedded_png_at(file_bytes: &[u8], sig_offset: usize, max_side: u32) -> Option<&[u8]> {
     let header = file_bytes.get(sig_offset.checked_sub(12)?..sig_offset)?;
     let le_u32 = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().unwrap());
     let (width, height, png_len) = (le_u32(0), le_u32(4), le_u32(8) as usize);
@@ -362,8 +361,7 @@ fn embedded_png_at(file_bytes: &[u8], sig_offset: usize) -> Option<&[u8]> {
     // IHDR is the first chunk: length and type, then big-endian width and
     // height.
     let be_u32 = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
-    let max = MAX_TEXTURE_DIMENSION as u32;
-    let size_ok = |side: u32| (1..=max).contains(&side);
+    let size_ok = |side: u32| (1..=max_side).contains(&side);
     (size_ok(width) && size_ok(height) && (be_u32(16), be_u32(20)) == (width, height))
         .then_some(png)
 }
@@ -447,12 +445,17 @@ struct TextureHeader {
 /// 8192x8192, instead of 1.25 GiB at the engine's absolute 16384 limit).
 const MAX_TEXTURE_DIMENSION: i32 = 8192;
 
-/// Decodes a PNG from an untrusted file. `image`'s default limits cap the
-/// allocation but not the dimensions, so a tiny deflate bomb still decodes
-/// to hundreds of MiB; this applies the same side cap as cooked textures,
-/// with only enough memory for one 8-bit RGBA image that size.
-pub fn decode_png(reader: impl std::io::BufRead + Seek) -> image::ImageResult<image::DynamicImage> {
-    let side = MAX_TEXTURE_DIMENSION as u32;
+/// Decodes a PNG from an untrusted file, refusing (from its header, before
+/// decoding anything) one with a side over `max_side`, itself capped at the
+/// cooked textures' 8192 (`MAX_TEXTURE_DIMENSION`). `image`'s default limits cap
+/// the allocation but not the dimensions, so a tiny deflate bomb would still
+/// decode to hundreds of MiB; this allows only enough memory for one 8-bit
+/// RGBA image of the largest size allowed.
+pub fn decode_png(
+    reader: impl std::io::BufRead + Seek,
+    max_side: u32,
+) -> image::ImageResult<image::DynamicImage> {
+    let side = max_side.min(MAX_TEXTURE_DIMENSION as u32);
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(side);
     limits.max_image_height = Some(side);
@@ -888,8 +891,20 @@ fn find_texture2d_export_range(path: &Path, bytes: &[u8]) -> Option<(usize, usiz
 /// extra per-mip or per-platform-data field (streaming/VT-related) that
 /// only appears for some textures, but that's speculation, not something
 /// verified against bytes.
-fn decode_compressed_mip0(path: &Path, bytes: &[u8]) -> anyhow::Result<image::RgbaImage> {
+fn decode_compressed_mip0(
+    path: &Path,
+    bytes: &[u8],
+    max_side: u32,
+) -> anyhow::Result<image::RgbaImage> {
     let (header, payload) = find_mip0(path, bytes)?;
+    // Checked on the header, before the decode allocates for its size.
+    if header.size_x.max(header.size_y) as u32 > max_side {
+        anyhow::bail!(
+            "texture is {}x{}, larger than {max_side}x{max_side}",
+            header.size_x,
+            header.size_y
+        );
+    }
     decode_mip0(&header, payload)
 }
 
@@ -1081,7 +1096,7 @@ fn decode_blocks_into(
 /// and by decoding it, the next candidate being tried when it fails, up to
 /// `MAX_PNG_DECODE_ATTEMPTS` decodes.
 pub fn uasset_to_png(path: &Path) -> anyhow::Result<Vec<u8>> {
-    let image = uasset_to_image(path)?;
+    let image = uasset_to_image(path, MAX_TEXTURE_DIMENSION as u32)?;
     let mut out = Vec::new();
     image
         .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
@@ -1090,8 +1105,9 @@ pub fn uasset_to_png(path: &Path) -> anyhow::Result<Vec<u8>> {
 }
 
 /// Decodes a `.uasset` texture to an in-memory image, the way
-/// [`uasset_to_png`] finds it, without encoding it to PNG.
-pub fn uasset_to_image(path: &Path) -> anyhow::Result<image::DynamicImage> {
+/// [`uasset_to_png`] finds it, without encoding it to PNG. An image with a
+/// side over `max_side` is refused from its header, before it is decoded.
+pub fn uasset_to_image(path: &Path, max_side: u32) -> anyhow::Result<image::DynamicImage> {
     // The embedded-PNG scan reads raw file bytes and never needs
     // `unreal_asset` to parse the file: one of the three real fixtures it was
     // tested against (`ResearchPartIcon.uasset`) fails to fully parse via
@@ -1103,7 +1119,7 @@ pub fn uasset_to_image(path: &Path) -> anyhow::Result<image::DynamicImage> {
     let mut png_error = None;
     let mut decode_attempts = 0;
     for sig_offset in find_png_magic_offsets(&file_bytes) {
-        let Some(png_bytes) = embedded_png_at(&file_bytes, sig_offset) else {
+        let Some(png_bytes) = embedded_png_at(&file_bytes, sig_offset, max_side) else {
             continue;
         };
         // Each decode may inflate up to `decode_png`'s memory limit, so a
@@ -1117,7 +1133,7 @@ pub fn uasset_to_image(path: &Path) -> anyhow::Result<image::DynamicImage> {
         // so a corrupt/truncated embedded blob is caught here instead of
         // silently handed to the caller. A candidate that passed the header
         // checks by chance fails here, so the next one is still tried.
-        match decode_png(std::io::Cursor::new(png_bytes)) {
+        match decode_png(std::io::Cursor::new(png_bytes), max_side) {
             Ok(image) => return Ok(image),
             Err(e) => {
                 png_error.get_or_insert(e);
@@ -1130,7 +1146,7 @@ pub fn uasset_to_image(path: &Path) -> anyhow::Result<image::DynamicImage> {
     // FTexturePlatformData mip chain and decoding its BC/DXT blocks. See
     // decode_compressed_mip0's doc comment for exactly which fixtures this
     // is confirmed to work on.
-    decode_compressed_mip0(path, &file_bytes)
+    decode_compressed_mip0(path, &file_bytes, max_side)
         .map(image::DynamicImage::ImageRgba8)
         .map_err(|e| match png_error {
             Some(png_error) => anyhow::anyhow!(
@@ -1153,6 +1169,9 @@ mod tests {
     use unreal_asset::properties::set_property::SetProperty;
     use unreal_asset::properties::str_property::NameProperty;
     use unreal_asset::unversioned::ancestry::Ancestry;
+
+    /// The cap [`uasset_to_png`] decodes with.
+    const MAX: u32 = MAX_TEXTURE_DIMENSION as u32;
 
     #[test]
     fn summary_cursor_fails_on_fstring_lengths_past_the_data() {
@@ -1312,7 +1331,7 @@ mod tests {
             embedded_png_candidate(&png_bytes(3, 5)),
         ]);
 
-        let image = uasset_to_image(&path).unwrap();
+        let image = uasset_to_image(&path, MAX).unwrap();
 
         assert_eq!((image.width(), image.height()), (3, 5));
     }
@@ -1321,7 +1340,7 @@ mod tests {
     fn uasset_to_image_reports_an_embedded_png_that_fails_to_decode() {
         let (_tmp, path) = uasset_with(&[embedded_png_candidate(&png_without_image_data(2, 2))]);
 
-        let error = uasset_to_image(&path).unwrap_err().to_string();
+        let error = uasset_to_image(&path, MAX).unwrap_err().to_string();
 
         assert!(error.starts_with("embedded PNG in "), "{error}");
     }
@@ -1333,7 +1352,7 @@ mod tests {
         for (width, height) in [(5, 3), (0, 5), (3, 0), (over_cap, 5)] {
             let (_tmp, path) = uasset_with(&[embedded_png_candidate_sized(&png, width, height)]);
 
-            let error = uasset_to_image(&path).unwrap_err().to_string();
+            let error = uasset_to_image(&path, MAX).unwrap_err().to_string();
 
             assert!(
                 error.starts_with("no embedded-PNG"),
@@ -1350,21 +1369,36 @@ mod tests {
         let mut candidates = vec![broken.clone(); MAX_PNG_DECODE_ATTEMPTS - 1];
         candidates.push(good.clone());
         let (_tmp, path) = uasset_with(&candidates);
-        assert!(uasset_to_image(&path).is_ok());
+        assert!(uasset_to_image(&path, MAX).is_ok());
 
         let mut candidates = vec![broken; MAX_PNG_DECODE_ATTEMPTS];
         candidates.push(good);
         let (_tmp, path) = uasset_with(&candidates);
-        let error = uasset_to_image(&path).unwrap_err().to_string();
+        let error = uasset_to_image(&path, MAX).unwrap_err().to_string();
         assert!(error.starts_with("embedded PNG in "), "{error}");
     }
 
     #[test]
     fn decode_png_caps_the_image_size() {
-        let side = MAX_TEXTURE_DIMENSION as u32;
-        assert!(decode_png(std::io::Cursor::new(png_bytes(16, 16))).is_ok());
-        assert!(decode_png(std::io::Cursor::new(png_bytes(side + 1, 1))).is_err());
-        assert!(decode_png(std::io::Cursor::new(png_bytes(1, side + 1))).is_err());
+        let decode = |width, height, max_side| {
+            decode_png(std::io::Cursor::new(png_bytes(width, height)), max_side)
+        };
+        assert!(decode(16, 16, MAX).is_ok());
+        assert!(decode(MAX + 1, 1, MAX).is_err());
+        assert!(decode(1, MAX + 1, MAX).is_err());
+        // A larger `max_side` doesn't lift the texture cap.
+        assert!(decode(MAX + 1, 1, u32::MAX).is_err());
+        assert!(decode(16, 16, 16).is_ok());
+        assert!(decode(17, 16, 16).is_err());
+    }
+
+    #[test]
+    fn uasset_to_image_refuses_an_embedded_png_over_max_side_without_decoding_it() {
+        let (_tmp, path) = uasset_with(&[embedded_png_candidate(&png_bytes(3, 5))]);
+
+        assert!(uasset_to_image(&path, 5).is_ok());
+        let error = uasset_to_image(&path, 4).unwrap_err().to_string();
+        assert!(error.starts_with("no embedded-PNG"), "{error}");
     }
 
     #[test]

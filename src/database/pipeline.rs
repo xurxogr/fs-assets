@@ -128,21 +128,8 @@ pub const MAX_ICON_DIMENSION: u32 = 1024;
 /// Decodes one icon file to an in-memory image: a `.png` is read as is, a
 /// `.uasset` texture is converted first (catching a panicking decoder).
 /// Any other extension is rejected, and so is an image with a side over
-/// [`MAX_ICON_DIMENSION`].
+/// [`MAX_ICON_DIMENSION`], from its header, before it is decoded.
 pub fn decode_icon(path: &Path) -> anyhow::Result<image::DynamicImage> {
-    let image = decode_icon_any_size(path)?;
-    if image.width().max(image.height()) > MAX_ICON_DIMENSION {
-        anyhow::bail!(
-            "icon {} is {}x{}, larger than {MAX_ICON_DIMENSION}x{MAX_ICON_DIMENSION}",
-            path.display(),
-            image.width(),
-            image.height()
-        );
-    }
-    Ok(image)
-}
-
-fn decode_icon_any_size(path: &Path) -> anyhow::Result<image::DynamicImage> {
     let extension = path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -150,8 +137,16 @@ fn decode_icon_any_size(path: &Path) -> anyhow::Result<image::DynamicImage> {
     match extension.as_deref() {
         Some("png") => std::fs::File::open(path)
             .map_err(image::ImageError::IoError)
-            .and_then(|file| crate::convert::decode_png(std::io::BufReader::new(file)))
-            .map_err(|e| anyhow::anyhow!("failed to read icon {}: {e}", path.display())),
+            .and_then(|file| {
+                crate::convert::decode_png(std::io::BufReader::new(file), MAX_ICON_DIMENSION)
+            })
+            .map_err(|e| match e {
+                image::ImageError::Limits(_) => anyhow::anyhow!(
+                    "icon {} is larger than {MAX_ICON_DIMENSION}x{MAX_ICON_DIMENSION}",
+                    path.display()
+                ),
+                e => anyhow::anyhow!("failed to read icon {}: {e}", path.display()),
+            }),
         Some("uasset") => decode_uasset_icon(path),
         _ => anyhow::bail!(
             "unsupported icon {}: expected a .png or .uasset file",
@@ -163,7 +158,7 @@ fn decode_icon_any_size(path: &Path) -> anyhow::Result<image::DynamicImage> {
 /// Decodes a `.uasset` texture, turning a decoder panic into an error.
 fn decode_uasset_icon(path: &Path) -> anyhow::Result<image::DynamicImage> {
     let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        crate::convert::uasset_to_image(path)
+        crate::convert::uasset_to_image(path, MAX_ICON_DIMENSION)
     }));
 
     match decoded {
