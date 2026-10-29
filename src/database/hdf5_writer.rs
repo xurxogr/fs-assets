@@ -36,6 +36,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::str::FromStr;
 
+use anyhow::Context;
 use hdf5::types::VarLenUnicode;
 
 use crate::atomic_write;
@@ -178,7 +179,26 @@ fn read_database_within(
     path: &Path,
     max_image_bytes: usize,
 ) -> anyhow::Result<BTreeMap<i32, Vec<IconTemplate>>> {
-    let file = hdf5::File::open(path)?;
+    read_file(path, |file| read_every_group(file, max_image_bytes))
+}
+
+/// Opens the database at `path` and reads it with `read`, naming `path` in
+/// any error.
+fn read_file<T>(
+    path: &Path,
+    read: impl FnOnce(&hdf5::File) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    hdf5::File::open(path)
+        .map_err(anyhow::Error::from)
+        .and_then(|file| read(&file))
+        .with_context(|| format!("reading {}", path.display()))
+}
+
+/// The body of [`read_database_within`], over the opened `file`.
+fn read_every_group(
+    file: &hdf5::File,
+    max_image_bytes: usize,
+) -> anyhow::Result<BTreeMap<i32, Vec<IconTemplate>>> {
     check_version(&file.attr("version")?, "the database")?;
     let supported: Vec<String> = crate::database::SUPPORTED_RESOLUTIONS
         .iter()
@@ -189,10 +209,7 @@ fn read_database_within(
         .into_iter()
         .find(|name| !supported.contains(name))
     {
-        anyhow::bail!(
-            "{} has an unknown member {unknown:?}; refusing to rewrite it without it",
-            path.display()
-        );
+        anyhow::bail!("unknown member {unknown:?}; refusing to rewrite the database without it");
     }
     let mut resolutions = BTreeMap::new();
     let mut image_bytes = 0usize;
@@ -206,10 +223,7 @@ fn read_database_within(
         // still let 16 full groups add up to gigabytes.
         image_bytes += template_count(&group, resolution)? * image_len(resolution);
         if image_bytes > max_image_bytes {
-            anyhow::bail!(
-                "{} holds over {max_image_bytes} bytes of images",
-                path.display()
-            );
+            anyhow::bail!("over {max_image_bytes} bytes of images");
         }
         resolutions.insert(resolution, read_group(&group, resolution)?);
     }
@@ -223,11 +237,10 @@ pub fn read_resolution(path: &Path, resolution: i32) -> anyhow::Result<Vec<IconT
     if !crate::database::SUPPORTED_RESOLUTIONS.contains(&resolution) {
         anyhow::bail!("unsupported resolution {resolution}");
     }
-    let file = hdf5::File::open(path)?;
-    match file.group(&resolution.to_string()) {
+    read_file(path, |file| match file.group(&resolution.to_string()) {
         Ok(group) => read_group(&group, resolution),
         Err(_) => Ok(Vec::new()),
-    }
+    })
 }
 
 /// How many templates each mod has at each resolution of a database.
@@ -243,7 +256,11 @@ pub struct DatabaseStatistics {
 /// Counts the templates per mod and resolution, reading only the mod names
 /// (no images).
 pub fn read_statistics(path: &Path) -> anyhow::Result<DatabaseStatistics> {
-    let file = hdf5::File::open(path)?;
+    read_file(path, statistics_of)
+}
+
+/// The body of [`read_statistics`], over the opened `file`.
+fn statistics_of(file: &hdf5::File) -> anyhow::Result<DatabaseStatistics> {
     let mut stats = DatabaseStatistics::default();
 
     for &resolution in &crate::database::SUPPORTED_RESOLUTIONS {
@@ -255,8 +272,7 @@ pub fn read_statistics(path: &Path) -> anyhow::Result<DatabaseStatistics> {
         if n == 0 {
             continue;
         }
-        let mods: Vec<VarLenUnicode> =
-            sized_dataset(&group, resolution, "mods", &[n])?.read_raw()?;
+        let mods: Vec<VarLenUnicode> = read_dataset(&group, resolution, "mods", &[n])?;
         for mod_name in &mods {
             *stats
                 .per_mod
@@ -327,6 +343,19 @@ fn sized_dataset(
     Ok(dataset)
 }
 
+/// Every value of dataset `name` of `group`, which must have exactly `shape`
+/// (see [`sized_dataset`]), naming the dataset if they can't be read.
+fn read_dataset<T: hdf5::H5Type>(
+    group: &hdf5::Group,
+    resolution: i32,
+    name: &str,
+    shape: &[usize],
+) -> anyhow::Result<Vec<T>> {
+    sized_dataset(group, resolution, name, shape)?
+        .read_raw()
+        .with_context(|| format!("group {resolution}: reading {name}"))
+}
+
 /// A string read from the file as an owned `String`. `VarLenUnicode`'s own
 /// `to_string` trusts the pointer HDF5 handed back to be non-null and UTF-8;
 /// an unwritten or foreign dataset breaks both.
@@ -346,15 +375,13 @@ fn read_group(group: &hdf5::Group, resolution: i32) -> anyhow::Result<Vec<IconTe
     let icon_size = crate::database::icon_size_for_resolution(resolution) as usize;
     let image_len = image_len(resolution);
 
-    let column = |name: &str| sized_dataset(group, resolution, name, &[n]);
-    let images: Vec<u8> =
-        sized_dataset(group, resolution, "images", &[n, icon_size, icon_size, 3])?.read_raw()?;
-    let codes: Vec<VarLenUnicode> = column("codes")?.read_raw()?;
-    let mods: Vec<VarLenUnicode> = column("mods")?.read_raw()?;
-    let crated: Vec<bool> = column("crated")?.read_raw()?;
-    let faction: Vec<u8> = column("faction")?.read_raw()?;
-    let category: Vec<u8> = column("category")?.read_raw()?;
-    let phash: Vec<u64> = column("phash")?.read_raw()?;
+    let images: Vec<u8> = read_dataset(group, resolution, "images", &[n, icon_size, icon_size, 3])?;
+    let codes: Vec<VarLenUnicode> = read_dataset(group, resolution, "codes", &[n])?;
+    let mods: Vec<VarLenUnicode> = read_dataset(group, resolution, "mods", &[n])?;
+    let crated: Vec<bool> = read_dataset(group, resolution, "crated", &[n])?;
+    let faction: Vec<u8> = read_dataset(group, resolution, "faction", &[n])?;
+    let category: Vec<u8> = read_dataset(group, resolution, "category", &[n])?;
+    let phash: Vec<u64> = read_dataset(group, resolution, "phash", &[n])?;
 
     let mut templates = Vec::with_capacity(n);
     for i in 0..n {
@@ -524,7 +551,7 @@ mod tests {
         let mut bad: BTreeMap<i32, Vec<IconTemplate>> = BTreeMap::new();
         bad.insert(1080, vec![sample_from("Rifle\0", "vanilla", 1080)]);
         let err = write_database(&bad, &path).unwrap_err();
-        assert!(err.to_string().contains("HDF5 string"), "{err}");
+        assert!(format!("{err:#}").contains("HDF5 string"), "{err}");
 
         let after = read_database(&path).unwrap();
         assert_eq!(after.len(), before.len());
@@ -555,7 +582,7 @@ mod tests {
         }
 
         let err = read_database(&path).unwrap_err();
-        assert!(err.to_string().contains("template_count is 4"), "{err}");
+        assert!(format!("{err:#}").contains("template_count is 4"), "{err}");
     }
 
     #[test]
@@ -575,7 +602,31 @@ mod tests {
         }
 
         let err = read_database(&path).unwrap_err();
-        assert!(err.to_string().contains("null string"), "{err}");
+        assert!(format!("{err:#}").contains("null string"), "{err}");
+    }
+
+    #[test]
+    fn read_errors_name_the_file_and_the_dataset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("db.h5");
+        write_two_mod_database(&path);
+        {
+            let file = hdf5::File::open_rw(&path).unwrap();
+            let group = file.group("1080").unwrap();
+            group.unlink("phash").unwrap();
+            group
+                .new_dataset::<VarLenUnicode>()
+                .shape(3)
+                .create("phash")
+                .unwrap();
+        }
+
+        let err = format!("{:#}", read_database(&path).unwrap_err());
+        assert!(
+            err.contains(&format!("reading {}", path.display())),
+            "{err}"
+        );
+        assert!(err.contains("group 1080: reading phash"), "{err}");
     }
 
     #[test]
@@ -598,7 +649,7 @@ mod tests {
             read_resolution(&path, 1080).unwrap_err(),
             read_statistics(&path).unwrap_err(),
         ] {
-            assert!(err.to_string().contains("is negative"), "{err}");
+            assert!(format!("{err:#}").contains("is negative"), "{err}");
         }
     }
 
@@ -614,7 +665,7 @@ mod tests {
 
         let err = read_database(&path).unwrap_err();
         assert!(
-            err.to_string().contains("unknown member \"extra\""),
+            format!("{err:#}").contains("unknown member \"extra\""),
             "{err}"
         );
     }
@@ -635,7 +686,10 @@ mod tests {
             }
 
             let err = read_database(&path).unwrap_err();
-            assert!(err.to_string().contains("version 1, expected 2"), "{err}");
+            assert!(
+                format!("{err:#}").contains("version 1, expected 2"),
+                "{err}"
+            );
         }
     }
 
@@ -649,7 +703,7 @@ mod tests {
 
         assert!(read_database_within(&path, total).is_ok());
         let err = read_database_within(&path, total - 1).unwrap_err();
-        assert!(err.to_string().contains("bytes of images"), "{err}");
+        assert!(format!("{err:#}").contains("bytes of images"), "{err}");
     }
 
     #[test]
@@ -668,9 +722,9 @@ mod tests {
         }
 
         let err = read_database(&path).unwrap_err();
-        assert!(err.to_string().contains("over the limit"), "{err}");
+        assert!(format!("{err:#}").contains("over the limit"), "{err}");
         let err = read_statistics(&path).unwrap_err();
-        assert!(err.to_string().contains("over the limit"), "{err}");
+        assert!(format!("{err:#}").contains("over the limit"), "{err}");
     }
 
     #[test]
@@ -693,7 +747,7 @@ mod tests {
         }
 
         let err = read_database(&path).unwrap_err();
-        assert!(err.to_string().contains("images has shape"), "{err}");
+        assert!(format!("{err:#}").contains("images has shape"), "{err}");
     }
 
     #[test]
