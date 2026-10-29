@@ -163,8 +163,28 @@ pub fn read_database_or_empty(path: &Path) -> anyhow::Result<BTreeMap<i32, Vec<I
 /// empty `Vec`, same as an explicit empty group). This is the inverse of
 /// `write_database`, used by `add-mod` to load the existing database before
 /// merging a new mod's templates into it.
+///
+/// Since what it returns is written back in place of the file, a file this
+/// writer couldn't have produced is refused rather than read in part: one of
+/// another [`DATABASE_VERSION`], or with a member other than the supported
+/// resolution groups, which the rewrite would silently drop.
 pub fn read_database(path: &Path) -> anyhow::Result<BTreeMap<i32, Vec<IconTemplate>>> {
     let file = hdf5::File::open(path)?;
+    check_version(&file.attr("version")?, "the database")?;
+    let supported: Vec<String> = crate::database::SUPPORTED_RESOLUTIONS
+        .iter()
+        .map(i32::to_string)
+        .collect();
+    if let Some(unknown) = file
+        .member_names()?
+        .into_iter()
+        .find(|name| !supported.contains(name))
+    {
+        anyhow::bail!(
+            "{} has an unknown member {unknown:?}; refusing to rewrite it without it",
+            path.display()
+        );
+    }
     let mut resolutions = BTreeMap::new();
 
     for &resolution in &crate::database::SUPPORTED_RESOLUTIONS {
@@ -235,10 +255,20 @@ pub fn read_statistics(path: &Path) -> anyhow::Result<DatabaseStatistics> {
 /// keeping a hostile count from sizing gigabytes of reads.
 const MAX_TEMPLATES_PER_GROUP: usize = 50_000;
 
+/// Fails unless the `version` attribute `attr` of `what` is [`DATABASE_VERSION`].
+fn check_version(attr: &hdf5::Attribute, what: &str) -> anyhow::Result<()> {
+    let version: i64 = attr.read_scalar()?;
+    if version != DATABASE_VERSION {
+        anyhow::bail!("{what} has version {version}, expected {DATABASE_VERSION}");
+    }
+    Ok(())
+}
+
 /// A group's `template_count` attribute, checked to be in range.
 fn template_count(group: &hdf5::Group, resolution: i32) -> anyhow::Result<usize> {
     let count: i64 = group.attr("template_count")?.read_scalar()?;
-    let n = usize::try_from(count.max(0))?;
+    let n = usize::try_from(count)
+        .map_err(|_| anyhow::anyhow!("group {resolution}: template_count {count} is negative"))?;
     if n > MAX_TEMPLATES_PER_GROUP {
         anyhow::bail!(
             "group {resolution}: template_count {n} is over the limit of {MAX_TEMPLATES_PER_GROUP}"
@@ -278,6 +308,7 @@ fn vlen_to_string(s: &VarLenUnicode) -> anyhow::Result<String> {
 }
 
 fn read_group(group: &hdf5::Group, resolution: i32) -> anyhow::Result<Vec<IconTemplate>> {
+    check_version(&group.attr("version")?, &format!("group {resolution}"))?;
     let n = template_count(group, resolution)?;
     if n == 0 {
         return Ok(Vec::new());
@@ -515,6 +546,67 @@ mod tests {
 
         let err = read_database(&path).unwrap_err();
         assert!(err.to_string().contains("null string"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_negative_template_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("db.h5");
+        write_two_mod_database(&path);
+        {
+            let file = hdf5::File::open_rw(&path).unwrap();
+            let group = file.group("1080").unwrap();
+            group
+                .attr("template_count")
+                .unwrap()
+                .write_scalar(&-1i64)
+                .unwrap();
+        }
+
+        for err in [
+            read_database(&path).unwrap_err(),
+            read_resolution(&path, 1080).unwrap_err(),
+            read_statistics(&path).unwrap_err(),
+        ] {
+            assert!(err.to_string().contains("is negative"), "{err}");
+        }
+    }
+
+    #[test]
+    fn refuses_to_read_for_rewriting_a_member_it_would_drop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("db.h5");
+        write_two_mod_database(&path);
+        hdf5::File::open_rw(&path)
+            .unwrap()
+            .create_group("extra")
+            .unwrap();
+
+        let err = read_database(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown member \"extra\""),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn rejects_another_database_version() {
+        for group in [None, Some("1080")] {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("db.h5");
+            write_two_mod_database(&path);
+            {
+                let file = hdf5::File::open_rw(&path).unwrap();
+                let attr = match group {
+                    None => file.attr("version"),
+                    Some(name) => file.group(name).unwrap().attr("version"),
+                };
+                attr.unwrap().write_scalar(&1i64).unwrap();
+            }
+
+            let err = read_database(&path).unwrap_err();
+            assert!(err.to_string().contains("version 1, expected 2"), "{err}");
+        }
     }
 
     #[test]
