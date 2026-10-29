@@ -65,15 +65,13 @@ memchr = "2.8.2"
 # is hand-parsed from raw bytes; this crate only does the block-level pixel
 # math, which was deliberately not hand-rolled.
 texture2ddecoder = "0.1.2"
-hdf5 = "0.8"
+# The maintained fork of the `hdf5` crate (the original's last release, 0.8,
+# bundles HDF5 1.10.7 from 2020), under the original names so the code still
+# reads `hdf5::`.
+hdf5 = { package = "hdf5-metno", version = "0.15" }
 # Direct handle on hdf5-sys so the `static-hdf5` feature can build libhdf5 (and
 # its zlib filter) from source. Unifies with the hdf5 crate's own hdf5-sys dep.
-hdf5-sys = "0.8"
-# Only pulled in by `static-hdf5`. hdf5-src builds zlib with `-DZ_SOLO`, which
-# drops zlib's default allocator and breaks HDF5's deflate filter; depending on
-# libz-sys with its default features unifies it across the graph and restores
-# the allocator (aldanor/hdf5-rust#206).
-libz-sys = { version = "1.1", features = ["static"], optional = true }
+hdf5-sys = { package = "hdf5-metno-sys", version = "0.12" }
 # Temporary workspace add-mod extracts a .pak into when given one directly.
 tempfile = "3"
 # Ctrl-C handler of the `fs-assets` binary, so an interrupted command stops at
@@ -92,7 +90,7 @@ python = ["pyo3"]
 # Build and statically link HDF5 from source instead of using the system
 # libhdf5, so published wheels and binaries carry no external libhdf5. Local
 # builds keep the system library (faster). Needs CMake and a C compiler.
-static-hdf5 = ["hdf5-sys/static", "hdf5-sys/zlib", "dep:libz-sys"]
+static-hdf5 = ["hdf5-sys/static", "hdf5-sys/zlib"]
 
 # Two allocation-count sites in unreal_asset panic on garbage/misaligned
 # `Vec::with_capacity`/`IndexedMap::with_capacity` counts instead of
