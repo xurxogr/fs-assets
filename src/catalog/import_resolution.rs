@@ -16,23 +16,7 @@ pub fn resolve_import_full_path(import_obj: &Value, all_imports: &[Value]) -> Op
         return None;
     }
 
-    let outer_index = import_obj
-        .get("OuterIndex")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    if outer_index < 0 {
-        let package_import = import_at(outer_index, all_imports)?;
-        let package_path = package_import
-            .get("ObjectName")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        if package_path.starts_with("/Game/") {
-            return Some(package_path.to_string());
-        }
-    }
-
-    None
+    game_package(import_obj, all_imports).map(str::to_string)
 }
 
 /// Resolve any import to its asset path (for full extraction).
@@ -52,23 +36,20 @@ pub fn resolve_import_asset_path(import_obj: &Value, all_imports: &[Value]) -> O
         return None;
     }
 
-    let outer_index = import_obj
-        .get("OuterIndex")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    if outer_index < 0 {
-        let package_import = import_at(outer_index, all_imports)?;
-        let package_path = package_import
-            .get("ObjectName")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+    game_package(import_obj, all_imports).map(normalize_object_path)
+}
 
-        if package_path.starts_with("/Game/") {
-            return Some(normalize_object_path(package_path));
-        }
+/// The `/Game/...` name of the package `import_obj`'s `OuterIndex` points
+/// at, if it points at one.
+fn game_package<'a>(import_obj: &Value, all_imports: &'a [Value]) -> Option<&'a str> {
+    let outer_index = import_obj.get("OuterIndex").and_then(Value::as_i64)?;
+    if outer_index >= 0 {
+        return None;
     }
-
-    None
+    import_at(outer_index, all_imports)?
+        .get("ObjectName")
+        .and_then(Value::as_str)
+        .filter(|name| name.starts_with("/Game/"))
 }
 
 /// `uasset_to_full_json` imports use snake_case fields (`object_name`,

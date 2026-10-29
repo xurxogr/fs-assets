@@ -41,7 +41,9 @@ use std::path::Path;
 use serde_json::{json, Map, Value};
 
 use crate::catalog::import_resolution::{resolve_import_asset_path, to_pascalcase_import};
-use crate::catalog::utils::{import_at, load_full_json, parse_reference, resolve_import_path};
+use crate::catalog::utils::{
+    find_default_export, import_at, load_full_json, parse_reference, resolve_import_path,
+};
 
 // -- Data table file names (relative to the Data directory, no extension:
 // these are the `.uasset` file stems parsed via
@@ -170,15 +172,6 @@ fn resolve_reference_value(value: &Value, imports: &[Value]) -> Option<Value> {
     let path =
         import_at(index, imports).and_then(|import| resolve_import_asset_path(import, imports));
     Some(path.map(Value::String).unwrap_or_else(|| value.clone()))
-}
-
-fn find_default_export(asset: &Value) -> Option<&Value> {
-    asset.get("exports")?.as_array()?.iter().find(|e| {
-        e.get("object_name")
-            .and_then(Value::as_str)
-            .map(|s| s.starts_with("Default__"))
-            .unwrap_or(false)
-    })
 }
 
 /// Parse a profile table's Map property into a `key -> processed value`

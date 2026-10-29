@@ -211,6 +211,16 @@ pub fn import_at(import_index: i64, imports: &[Value]) -> Option<&Value> {
     imports.get(import_slot(import_index)?)
 }
 
+/// The `Default__` export of a `uasset_to_full_json` asset: its class
+/// default object, holding the properties a blueprint sets.
+pub fn find_default_export(asset: &Value) -> Option<&Value> {
+    asset.get("exports")?.as_array()?.iter().find(|e| {
+        e.get("object_name")
+            .and_then(Value::as_str)
+            .is_some_and(|s| s.starts_with("Default__"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

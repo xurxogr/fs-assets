@@ -28,7 +28,7 @@ use serde_json::{json, Map, Value};
 
 use crate::catalog::import_resolution;
 use crate::catalog::utils::{
-    import_at, import_slot, load_full_json, parse_reference, simplify_value,
+    find_default_export, import_at, import_slot, load_full_json, parse_reference, simplify_value,
 };
 
 /// Callback used to load a parent blueprint's asset JSON (in
@@ -159,12 +159,7 @@ impl<'a> Blueprints<'a> {
             .and_then(Value::as_array)
             .unwrap_or(&empty_imports);
 
-        let default_export = exports.iter().find(|e| {
-            e.get("object_name")
-                .and_then(Value::as_str)
-                .map(|s| s.starts_with("Default__"))
-                .unwrap_or(false)
-        })?;
+        let default_export = find_default_export(asset)?;
 
         let mut catalog_data = Map::new();
         catalog_data.insert("ObjectPath".to_string(), json!(object_path));
