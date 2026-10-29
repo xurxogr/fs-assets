@@ -6,6 +6,8 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::Context;
 use repak::PakBuilder;
 
+use crate::atomic_write;
+
 /// Lists every file path recorded in `pak`'s index.
 pub fn list(pak: &Path) -> anyhow::Result<Vec<String>> {
     let mut file =
@@ -149,9 +151,8 @@ where
                 output_dir.display()
             );
         }
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-        }
+        let parent = atomic_write::parent_dir(&dest);
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
 
         // `read_file` holds the entry's stored bytes in memory, so an entry
         // whose header is already over the budget is refused before it is
@@ -170,29 +171,44 @@ where
                 budget.remaining_bytes
             );
         }
+        // Written next to `dest` and renamed over it, never opened in place:
+        // whatever is at `dest` already (a file hard-linked elsewhere, a
+        // symlink put there after the check above) is replaced rather than
+        // written through, and a failed entry leaves it as it was.
+        let temp = entry_temp_file(parent)
+            .with_context(|| format!("creating a file in {}", parent.display()))?;
         let mut out = CappedWriter {
-            inner: BufWriter::new(
-                File::create(&dest).with_context(|| format!("creating {}", dest.display()))?,
-            ),
+            inner: BufWriter::new(temp),
             written: 0,
             budget: *budget,
         };
-        let written = reader
+        reader
             .read_file(&path, &mut file, &mut out)
             .map_err(anyhow::Error::from)
-            .and_then(|()| Ok(out.flush()?));
-        if let Err(e) = written {
-            drop(out);
-            let _ = fs::remove_file(&dest);
-            return Err(e.context(format!("failed to read {path}")));
-        }
-        budget.remaining_bytes -= out.written;
+            .and_then(|()| Ok(out.flush()?))
+            .with_context(|| format!("failed to read {path}"))?;
+        let CappedWriter { inner, written, .. } = out;
+        inner
+            .into_inner()
+            .map_err(io::IntoInnerError::into_error)?
+            .persist(&dest)
+            .with_context(|| format!("creating {}", dest.display()))?;
+        budget.remaining_bytes -= written;
         extracted.push(path);
         progress(extracted.len(), total)?;
     }
 
     extracted.sort();
     Ok(extracted)
+}
+
+/// A new temporary file in `dir` for one extracted entry, with the mode a
+/// plain create would give it (`tempfile`'s own default is owner-only).
+fn entry_temp_file(dir: &Path) -> io::Result<tempfile::NamedTempFile> {
+    let mut builder = tempfile::Builder::new();
+    #[cfg(unix)]
+    builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o666));
+    builder.tempfile_in(dir)
 }
 
 /// A writer that fails once more than `budget` allows for one entry has gone
@@ -581,6 +597,51 @@ mod tests {
             &mut budget.clone(),
         );
         assert_eq!(ok.unwrap(), vec!["small.txt".to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replaces_a_hard_link_at_the_destination_instead_of_writing_through_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pak_path = tmp.path().join("test.pak");
+        fs::write(&pak_path, build_test_pak()).unwrap();
+        let victim = tmp.path().join("victim.txt");
+        fs::write(&victim, b"keep me").unwrap();
+        let out_dir = tmp.path().join("out");
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::hard_link(&victim, out_dir.join("b.txt")).unwrap();
+
+        extract(&pak_path, None, &out_dir).unwrap();
+
+        assert_eq!(fs::read(&victim).unwrap(), b"keep me");
+        assert_eq!(fs::read(out_dir.join("b.txt")).unwrap(), b"world");
+    }
+
+    /// Compared with a file `fs::write` creates, which gets the umask's mode.
+    #[cfg(unix)]
+    #[test]
+    fn extracted_files_get_a_plain_create_mode_and_leave_no_temporary_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let tmp = tempfile::tempdir().unwrap();
+        let pak_path = tmp.path().join("test.pak");
+        fs::write(&pak_path, build_test_pak()).unwrap();
+        let plain = tmp.path().join("plain.txt");
+        fs::write(&plain, b"").unwrap();
+        let out_dir = tmp.path().join("out");
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::write(out_dir.join("b.txt"), b"old").unwrap();
+
+        extract(&pak_path, None, &out_dir).unwrap();
+
+        assert_eq!(fs::read(out_dir.join("b.txt")).unwrap(), b"world");
+        assert_eq!(mode(&out_dir.join("dir/a.txt")), mode(&plain));
+        let mut names: Vec<_> = fs::read_dir(&out_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["b.txt", "dir"]);
     }
 
     #[test]
