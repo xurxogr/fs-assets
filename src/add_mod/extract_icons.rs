@@ -49,6 +49,9 @@ pub fn extract_icons(
     request: &ExtractIconsRequest,
     progress: &dyn Fn(Progress) -> anyhow::Result<()>,
 ) -> anyhow::Result<ExtractIconsStats> {
+    if !request.subicons && request.vanilla.is_some() {
+        anyhow::bail!("a vanilla source is only used for subicons, which are turned off");
+    }
     let report =
         |stage: Stage| move |done: usize, total: usize| progress(Progress { stage, done, total });
     let catalog = load_catalog(&request.catalog)?;
@@ -382,6 +385,24 @@ mod tests {
             output: dir.join("out"),
             subicons,
         }
+    }
+
+    #[test]
+    fn a_vanilla_source_without_subicons_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let request = ExtractIconsRequest {
+            vanilla: Some(AssetSource::ExtractDir(tmp.path().to_path_buf())),
+            ..request(
+                AssetSource::ExtractDir(tmp.path().to_path_buf()),
+                tmp.path(),
+                false,
+            )
+        };
+
+        let err = extract_icons(&request, &|_| Ok(())).unwrap_err();
+
+        assert!(err.to_string().contains("only used for subicons"), "{err}");
+        assert!(!request.output.exists());
     }
 
     #[test]

@@ -172,7 +172,7 @@ enum Commands {
         #[arg(long)]
         replace: bool,
         /// Remove the matching icon instead of adding one.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["replace", "icon"])]
         remove: bool,
     },
     /// Decode a `.locres` file into an editable JSON translation file (see

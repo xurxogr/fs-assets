@@ -25,6 +25,9 @@ pub struct PakCoverage {
 
 /// Reports which of `catalog_path`'s icons `paks` contain.
 pub fn pak_coverage(catalog_path: &Path, paks: &[PathBuf]) -> anyhow::Result<PakCoverage> {
+    if paks.is_empty() {
+        anyhow::bail!("at least one pak is required");
+    }
     let catalog = load_catalog(catalog_path)?;
     let main_icons = main_icon_paths(&catalog);
     let overlays = overlay_icon_paths(&catalog);
@@ -64,6 +67,13 @@ mod tests {
         ]);
         std::fs::write(&path, serde_json::to_vec_pretty(&catalog).unwrap()).unwrap();
         path
+    }
+
+    #[test]
+    fn no_pak_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = pak_coverage(&write_catalog(tmp.path()), &[]).unwrap_err();
+        assert!(err.to_string().contains("at least one pak"), "{err}");
     }
 
     #[test]

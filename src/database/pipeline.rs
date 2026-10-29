@@ -557,6 +557,9 @@ pub fn modify_icon_in_database(
 ) -> anyhow::Result<()> {
     database::check_template_name("code", &identity.code)?;
     database::check_template_name("mod name", &identity.mod_name)?;
+    if remove && (replace || icon.is_some()) {
+        anyhow::bail!("--remove can't be combined with --replace or --icon");
+    }
     let _lock = hdf5_writer::lock_database(output_path)?;
     let existing = hdf5_writer::read_database_or_empty(output_path)?;
 
@@ -1686,6 +1689,32 @@ mod tests {
             )
             .unwrap_err();
             assert!(err.to_string().contains("not found"));
+        }
+
+        #[test]
+        fn remove_combined_with_replace_or_an_icon_errors_before_touching_the_database() {
+            let tmp = tempfile::tempdir().unwrap();
+            let output = tmp.path().join("out.h5");
+            let icon = tmp.path().join("rifle.png");
+            for (icon, replace) in [(None, true), (Some(icon.as_path()), false)] {
+                let err = modify_icon_in_database(
+                    &identity(
+                        "Rifle",
+                        ItemFaction::Neutral,
+                        ItemCategory::Item,
+                        false,
+                        "vanilla",
+                    ),
+                    icon,
+                    &[1080],
+                    replace,
+                    true,
+                    &output,
+                )
+                .unwrap_err();
+                assert!(err.to_string().contains("can't be combined"), "{err}");
+                assert!(!output.exists());
+            }
         }
 
         #[test]
