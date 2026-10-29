@@ -88,7 +88,9 @@ fn read_bytes<R: Read>(r: &mut R, len: usize) -> io::Result<Vec<u8>> {
 
 /// Read a UE4 `FString`: `i32` length prefix, empty/UTF-16/Latin-1 body per
 /// the sign of the length, its NUL terminator stripped (only that one, so a
-/// NUL that is part of the text survives a round trip). Truncation is an error:
+/// NUL that is part of the text survives a round trip). Unpaired UTF-16
+/// surrogates, which no `String` can hold, are replaced with U+FFFD and
+/// logged as a warning. Truncation is an error:
 /// this reader is meant to faithfully round-trip real files, not to shrug
 /// off malformed ones.
 fn read_fstring<R: Read>(r: &mut R) -> io::Result<String> {
@@ -107,7 +109,12 @@ fn read_fstring<R: Read>(r: &mut R) -> io::Result<String> {
             .map(|&pair| u16::from_le_bytes(pair))
             .collect();
         let units = units.strip_suffix(&[0]).unwrap_or(&units);
-        Ok(String::from_utf16_lossy(units))
+        Ok(String::from_utf16(units).unwrap_or_else(|_| {
+            // A `String` can't hold them, so this text can't round-trip.
+            let text = String::from_utf16_lossy(units);
+            log::warn!("locres: unpaired UTF-16 surrogates replaced with U+FFFD in {text:?}");
+            text
+        }))
     } else {
         let data = read_bytes(r, length as usize)?;
         let data = data.strip_suffix(&[0]).unwrap_or(&data);
@@ -691,6 +698,15 @@ mod tests {
             assert_eq!(buf.len(), 4 + 9 * 2);
             let e_bytes = &buf[4 + 2 * 2..4 + 3 * 2];
             assert_eq!(e_bytes, &[0xC9, 0x00]);
+        }
+
+        #[test]
+        fn replaces_unpaired_surrogates() {
+            let mut data = (-3i32).to_le_bytes().to_vec();
+            for unit in [u16::from(b'a'), 0xD800, 0] {
+                data.extend_from_slice(&unit.to_le_bytes());
+            }
+            assert_eq!(read_fstring(&mut data.as_slice()).unwrap(), "a\u{FFFD}");
         }
 
         #[test]
