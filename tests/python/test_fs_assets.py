@@ -70,8 +70,18 @@ def test_modify_icon_invalid_category_raises_value_error():
 
 def test_modify_icon_requires_icon_unless_removing(tmp_path):
     db = tmp_path / "database.h5"
-    with pytest.raises(RuntimeError):
+    with pytest.raises(ValueError, match="icon is required"):
         fs_assets.modify_icon(str(db), code="T_Test", faction="neutral", category="item")
+
+
+def test_modify_icon_rejects_conflicting_and_unstorable_arguments(tmp_path):
+    db = tmp_path / "database.h5"
+    identity = {"faction": "neutral", "category": "item"}
+    with pytest.raises(ValueError, match="can't be combined"):
+        fs_assets.modify_icon(str(db), code="T_Test", **identity, remove=True, replace=True)
+    with pytest.raises(ValueError, match="code is empty"):
+        fs_assets.modify_icon(str(db), code="", **identity, remove=True)
+    assert not db.exists()
 
 
 RIFLE_ICON = "War/Content/Textures/UI/ItemIcons/T_Rifle"
@@ -252,7 +262,7 @@ def test_add_mod_accepts_several_paks(tmp_path):
 
 
 def test_add_mod_rejects_an_unsupported_resolution(tmp_path):
-    with pytest.raises(RuntimeError, match="unsupported resolution 1234"):
+    with pytest.raises(ValueError, match="unsupported resolution 1234"):
         fs_assets.add_mod(
             pak=str(_icon_mod_pak(tmp_path)),
             catalog=str(_catalog(tmp_path)),
@@ -296,8 +306,16 @@ def test_read_templates_rejects_an_unsupported_resolution(tmp_path):
     icon = _png(tmp_path / "rifle.png", 8, 8, (0, 0, 0, 255))
     fs_assets.modify_icon(str(db), code="Rifle", faction="neutral", category="item", icon=str(icon))
 
-    with pytest.raises(RuntimeError, match="unsupported resolution"):
+    with pytest.raises(ValueError, match="unsupported resolution"):
         fs_assets.read_templates(str(db), 1234)
+
+
+def test_reading_a_missing_database_raises_file_not_found(tmp_path):
+    db = tmp_path / "missing.h5"
+    with pytest.raises(FileNotFoundError, match="missing.h5"):
+        fs_assets.read_templates(str(db), 1080)
+    with pytest.raises(FileNotFoundError, match="missing.h5"):
+        fs_assets.database_statistics(str(db))
 
 
 def test_cli_main_leaves_the_sigint_handler_alone(tmp_path):

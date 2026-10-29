@@ -188,8 +188,11 @@ fn read_file<T>(
     path: &Path,
     read: impl FnOnce(&hdf5::File) -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
-    hdf5::File::open(path)
+    // Checked first so a missing file fails with its I/O error, rather than
+    // with HDF5's own message for it.
+    std::fs::metadata(path)
         .map_err(anyhow::Error::from)
+        .and_then(|_| Ok(hdf5::File::open(path)?))
         .and_then(|file| read(&file))
         .with_context(|| format!("reading {}", path.display()))
 }
@@ -627,6 +630,24 @@ mod tests {
             "{err}"
         );
         assert!(err.contains("group 1080: reading phash"), "{err}");
+    }
+
+    #[test]
+    fn a_missing_database_fails_with_its_io_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("missing.h5");
+
+        for err in [
+            read_database(&path).unwrap_err(),
+            read_resolution(&path, 1080).unwrap_err(),
+            read_statistics(&path).unwrap_err(),
+        ] {
+            let io = err.chain().find_map(|e| e.downcast_ref::<std::io::Error>());
+            assert_eq!(
+                io.map(std::io::Error::kind),
+                Some(std::io::ErrorKind::NotFound)
+            );
+        }
     }
 
     #[test]

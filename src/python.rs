@@ -170,6 +170,17 @@ fn value_err(e: anyhow::Error) -> PyErr {
     PyErr::new::<PyValueError, _>(e.to_string())
 }
 
+/// The resolutions a `resolution` argument names (every supported one when
+/// it's omitted), or `ValueError` for one that isn't supported.
+fn resolutions_arg(resolution: Option<Vec<i32>>) -> PyResult<Vec<i32>> {
+    database::resolve_resolutions(&resolution.unwrap_or_default()).map_err(value_err)
+}
+
+/// `ValueError` unless `value`, the `what` argument, can name a template.
+fn name_arg(what: &str, value: &str) -> PyResult<()> {
+    database::check_template_name(what, value).map_err(value_err)
+}
+
 /// Extract files from a .pak archive.
 ///
 /// Args:
@@ -350,6 +361,8 @@ fn add_mod(
     resolution: Option<Vec<i32>>,
     progress: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    name_arg("mod_name", mod_name)?;
+    let resolutions = resolutions_arg(resolution)?;
     let paks = pak.map(PakPaths::into_paths).unwrap_or_default();
     let source = required_asset_source("extract_dir", extract_dir, "pak", paks)?;
     let request = AddModRequest {
@@ -363,7 +376,7 @@ fn add_mod(
         catalog,
         db,
         mod_name: mod_name.to_string(),
-        resolutions: resolution.unwrap_or_default(),
+        resolutions,
     };
     let progress = PyProgress::new(progress);
     let result = py.detach(|| {
@@ -423,6 +436,18 @@ fn modify_icon(
     replace: bool,
     remove: bool,
 ) -> PyResult<()> {
+    name_arg("code", code)?;
+    name_arg("mod_name", mod_name)?;
+    if remove && (replace || icon.is_some()) {
+        return Err(PyValueError::new_err(
+            "remove can't be combined with replace or icon",
+        ));
+    }
+    if !remove && icon.is_none() {
+        return Err(PyValueError::new_err(
+            "icon is required unless remove is set",
+        ));
+    }
     let identity = database::pipeline::IconIdentity {
         code: code.to_string(),
         faction: parse_choice("faction", faction)?,
@@ -430,8 +455,7 @@ fn modify_icon(
         crated,
         mod_name: mod_name.to_string(),
     };
-    let resolutions =
-        database::resolve_resolutions(&resolution.unwrap_or_default()).map_err(to_py_err)?;
+    let resolutions = resolutions_arg(resolution)?;
 
     py.detach(|| {
         database::pipeline::modify_icon_in_database(
@@ -605,6 +629,11 @@ fn extract_icons(
     vanilla_pak: Option<PathBuf>,
     progress: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    if !subicons && (vanilla_extract_dir.is_some() || vanilla_pak.is_some()) {
+        return Err(PyValueError::new_err(
+            "a vanilla source is only used for subicons, which are turned off",
+        ));
+    }
     let paks = pak.map(PakPaths::into_paths).unwrap_or_default();
     let source = required_asset_source("extract_dir", extract_dir, "pak", paks)?;
     let request = ExtractIconsRequest {
@@ -653,6 +682,9 @@ fn extract_icons(
 #[pyo3(signature = (*, catalog, pak))]
 fn pak_coverage(py: Python<'_>, catalog: PathBuf, pak: PakPaths) -> PyResult<Py<PyAny>> {
     let paks = pak.into_paths();
+    if paks.is_empty() {
+        return Err(PyValueError::new_err("at least one pak is required"));
+    }
     let coverage = py
         .detach(|| crate::add_mod::pak_coverage(&catalog, &paks))
         .map_err(to_py_err)?;
@@ -678,6 +710,11 @@ fn pak_coverage(py: Python<'_>, catalog: PathBuf, pak: PakPaths) -> PyResult<Py<
 ///     (side in pixels) and `image` (`size * size * 3` row-major BGR bytes).
 #[pyfunction]
 fn read_templates(py: Python<'_>, db: PathBuf, resolution: i32) -> PyResult<Py<PyList>> {
+    if !database::SUPPORTED_RESOLUTIONS.contains(&resolution) {
+        return Err(PyValueError::new_err(format!(
+            "unsupported resolution {resolution}"
+        )));
+    }
     let templates = py
         .detach(|| database::hdf5_writer::read_resolution(&db, resolution))
         .map_err(to_py_err)?;
