@@ -95,6 +95,75 @@ const SIMPLE_PROPERTY_KEYS: &[&str] = &[
     "bApplyTankArmourAngleRangeBonuses",
 ];
 
+/// A damage type's `DescriptionDetails` lines with text, joined with
+/// newlines, and the translations of those with a localization key, per
+/// language and joined the same way (`None` when no line has one); `None`
+/// when no line has text.
+fn description_details(
+    lines: &[Value],
+    loc_service: &LocalizationLookup,
+) -> Option<(String, Option<Map<String, Value>>)> {
+    let mut texts = Vec::new();
+    let mut guids = Vec::new();
+    for (text, guid) in lines.iter().filter_map(description_line) {
+        if text.is_empty() {
+            continue;
+        }
+        // A GUID text is the line's localization key, so its translations
+        // are looked up by it too.
+        if localization::is_guid(&text) {
+            texts.push(loc_service.get_with_fallback(&text, None));
+            guids.push(text);
+        } else {
+            // Already resolved text (from CultureInvariantString).
+            texts.push(text);
+            guids.extend(guid);
+        }
+    }
+    if texts.is_empty() {
+        return None;
+    }
+
+    let translations: Vec<_> = guids
+        .iter()
+        .map(|guid| loc_service.get_all_languages(guid))
+        .collect();
+    let languages: std::collections::BTreeSet<&String> =
+        translations.iter().flat_map(|t| t.keys()).collect();
+    let locales: Map<String, Value> = languages
+        .into_iter()
+        .map(|language| {
+            let lines: Vec<&str> = translations
+                .iter()
+                .filter_map(|t| t.get(language).map(String::as_str))
+                .collect();
+            (language.clone(), json!(lines.join("\n")))
+        })
+        .collect();
+    Some((texts.join("\n"), (!locales.is_empty()).then_some(locales)))
+}
+
+/// One `DescriptionDetails` line: its text, and the `Guid` a nested
+/// `{"Text": {"Text": "...", "Guid": "..."}}` one has; `None` for a line
+/// that isn't text at all.
+fn description_line(line: &Value) -> Option<(String, Option<String>)> {
+    match line {
+        Value::Object(m) => Some(match m.get("Text") {
+            Some(Value::Object(inner)) => (
+                inner
+                    .get("Text")
+                    .map(value_to_display_string)
+                    .unwrap_or_default(),
+                inner.get("Guid").and_then(Value::as_str).map(String::from),
+            ),
+            Some(text) if is_truthy(text) => (value_to_display_string(text), None),
+            _ => (String::new(), None),
+        }),
+        Value::String(s) => Some((s.clone(), None)),
+        _ => None,
+    }
+}
+
 /// Build a resolved `DamageType` dict from blueprint data.
 ///
 /// `dt_data` is the extracted damage type blueprint data (e.g. from
@@ -145,84 +214,18 @@ pub fn build_damage_type_result(
     }
 
     // Resolve DescriptionDetails (array of tooltip texts joined with newlines).
-    let mut description_details_set = false;
-    if let Some(desc_details) = dt_data.get("DescriptionDetails").and_then(Value::as_array) {
-        if !desc_details.is_empty() {
-            let mut texts: Vec<String> = Vec::new();
-            let mut guids: Vec<String> = Vec::new();
-
-            for item in desc_details {
-                let text = match item {
-                    Value::Object(m) => {
-                        let text_value = m.get("Text").cloned().unwrap_or(json!(""));
-                        // Handle nested dict format {"Text": {"Text": "...", "Guid": "..."}}.
-                        if let Value::Object(inner) = &text_value {
-                            let text = inner
-                                .get("Text")
-                                .map(value_to_display_string)
-                                .unwrap_or_default();
-                            if let Some(guid) = inner.get("Guid").and_then(Value::as_str) {
-                                guids.push(guid.to_string());
-                            }
-                            text
-                        } else if is_truthy(&text_value) {
-                            value_to_display_string(&text_value)
-                        } else {
-                            String::new()
-                        }
-                    }
-                    Value::String(s) => s.clone(),
-                    _ => continue,
-                };
-
-                if text.is_empty() {
-                    continue;
-                }
-
-                if localization::is_guid(&text) {
-                    guids.push(text.clone());
-                    texts.push(loc_service.get_with_fallback(&text, None));
-                } else {
-                    // Already resolved text (from CultureInvariantString).
-                    texts.push(text);
-                }
-            }
-
-            if !texts.is_empty() {
-                resolved.insert("DescriptionDetails".to_string(), json!(texts.join("\n")));
-                description_details_set = true;
-
-                // Build locales only if we have GUIDs to look up.
-                if !guids.is_empty() {
-                    let mut all_langs = std::collections::BTreeSet::new();
-                    for guid in &guids {
-                        let translations = loc_service.get_all_languages(guid);
-                        all_langs.extend(translations.into_keys());
-                    }
-
-                    if !all_langs.is_empty() {
-                        let mut locales = Map::new();
-                        for lang in &all_langs {
-                            let mut lang_texts = Vec::new();
-                            for guid in &guids {
-                                let translations = loc_service.get_all_languages(guid);
-                                if let Some(t) = translations.get(lang) {
-                                    lang_texts.push(t.clone());
-                                }
-                            }
-                            if !lang_texts.is_empty() {
-                                locales.insert(lang.clone(), json!(lang_texts.join("\n")));
-                            }
-                        }
-                        if !locales.is_empty() {
-                            resolved.insert(
-                                "DescriptionDetailsLocales".to_string(),
-                                Value::Object(locales),
-                            );
-                        }
-                    }
-                }
-            }
+    let description = dt_data
+        .get("DescriptionDetails")
+        .and_then(Value::as_array)
+        .and_then(|lines| description_details(lines, loc_service));
+    let description_details_set = description.is_some();
+    if let Some((text, locales)) = description {
+        resolved.insert("DescriptionDetails".to_string(), json!(text));
+        if let Some(locales) = locales {
+            resolved.insert(
+                "DescriptionDetailsLocales".to_string(),
+                Value::Object(locales),
+            );
         }
     }
 
@@ -534,6 +537,35 @@ mod tests {
 
             let loc = LocalizationLookup::new(&tmp, None);
             let dt_data = json!({"DescriptionDetails": [guid]});
+            let result =
+                build_damage_type_result(&dt_data, "/Game/Blueprints/DamageTypes/BP", &loc);
+
+            assert_eq!(result["DescriptionDetails"], json!("English text"));
+            assert_eq!(
+                result["DescriptionDetailsLocales"],
+                json!({"en": "English text", "fr": "French text"})
+            );
+        }
+
+        #[test]
+        fn nested_description_lines_are_translated_once_and_empty_ones_skipped() {
+            let tmp = tempfile::tempdir().unwrap();
+            let guid = "8BB336F4459740A6ADA7B28B2D91748B";
+            let empty_guid = "0BB336F4459740A6ADA7B28B2D91748B";
+            for (language, text) in [("en", "English text"), ("fr", "French text")] {
+                write_mock_locres(
+                    &tmp.path()
+                        .join(format!("Foxhole-Content/{language}/test.locres")),
+                    guid,
+                    text,
+                );
+            }
+
+            let loc = LocalizationLookup::new(tmp.path(), None);
+            let dt_data = json!({"DescriptionDetails": [
+                {"Text": {"Text": guid, "Guid": guid}},
+                {"Text": {"Text": "", "Guid": empty_guid}},
+            ]});
             let result =
                 build_damage_type_result(&dt_data, "/Game/Blueprints/DamageTypes/BP", &loc);
 
