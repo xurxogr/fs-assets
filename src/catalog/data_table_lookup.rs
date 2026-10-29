@@ -127,8 +127,9 @@ fn asset_imports(asset: &Value) -> Vec<Value> {
 }
 
 /// Recursively replace `"Reference: N"` sentinels with the referenced
-/// asset path (`War/Content/....0`). Null references (`0`) are dropped;
-/// references that don't point at a game asset are kept as-is.
+/// asset path (`War/Content/....0`). Null references (`0`) are dropped,
+/// except as a side of a map's `[key, value]` pair, where they become
+/// `null`; references that don't point at a game asset are kept as-is.
 fn resolve_references(value: &Value, imports: &[Value]) -> Value {
     match value {
         Value::Object(map) => Value::Object(
@@ -139,7 +140,19 @@ fn resolve_references(value: &Value, imports: &[Value]) -> Value {
         Value::Array(items) => Value::Array(
             items
                 .iter()
-                .filter_map(|v| resolve_reference_value(v, imports))
+                .filter_map(|v| match v {
+                    // A list in a list is one `[key, value]` pair of a map:
+                    // a null reference stays as `null` so the pair keeps
+                    // both sides.
+                    Value::Array(pair) => Some(Value::Array(
+                        pair.iter()
+                            .map(|side| {
+                                resolve_reference_value(side, imports).unwrap_or(Value::Null)
+                            })
+                            .collect(),
+                    )),
+                    v => resolve_reference_value(v, imports),
+                })
                 .collect(),
         ),
         other => other.clone(),
@@ -378,6 +391,19 @@ pub fn filesystem_blueprint_loader(blueprints_dir: &Path) -> impl Fn(&str) -> Op
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_null_reference_in_a_map_pair_keeps_its_place() {
+        let value = json!({
+            "List": ["a", "Reference: 0", "b"],
+            "Map": [["Rifle", "Reference: 0"], ["Pistol", 2]],
+        });
+
+        assert_eq!(
+            resolve_references(&value, &[]),
+            json!({"List": ["a", "b"], "Map": [["Rifle", null], ["Pistol", 2]]})
+        );
+    }
 
     #[test]
     fn an_out_of_range_reference_is_kept_as_is() {

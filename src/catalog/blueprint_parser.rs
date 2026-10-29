@@ -372,7 +372,25 @@ fn process_data(
                         full_extraction,
                         |v| result.push(v),
                     );
-                } else if matches!(item, Value::Object(_) | Value::Array(_)) {
+                } else if let Value::Array(pair) = item {
+                    // Asset arrays can't nest, so a list in a list is one
+                    // `[key, value]` pair of a map. Each side keeps its
+                    // place, as `null` when it resolves to nothing: a
+                    // shortened pair would stop the map reading as one.
+                    result.push(Value::Array(
+                        pair.iter()
+                            .map(|side| {
+                                process_pair_side(
+                                    side,
+                                    processed_imports,
+                                    exports,
+                                    imports,
+                                    full_extraction,
+                                )
+                            })
+                            .collect(),
+                    ));
+                } else if let Value::Object(_) = item {
                     let processed =
                         process_data(item, processed_imports, exports, imports, full_extraction);
                     // Note: unlike the dict branch, simplify_value is
@@ -391,6 +409,30 @@ fn process_data(
         }
         other => other.clone(),
     }
+}
+
+/// One side of a map's `[key, value]` pair, processed like a list item but
+/// `null` where a list item would be dropped.
+fn process_pair_side(
+    side: &Value,
+    processed_imports: &[Option<String>],
+    exports: &[Value],
+    imports: &[Value],
+    full_extraction: bool,
+) -> Value {
+    let Some(ref_idx) = side.as_str().and_then(parse_reference) else {
+        return process_data(side, processed_imports, exports, imports, full_extraction);
+    };
+    let mut resolved = Value::Null;
+    resolve_reference_into(
+        ref_idx,
+        processed_imports,
+        exports,
+        imports,
+        full_extraction,
+        |v| resolved = v,
+    );
+    resolved
 }
 
 /// Shared reference-resolution body for both the dict and list branches of
@@ -563,6 +605,31 @@ mod tests {
     }
     use serde_json::json;
     use std::collections::HashMap;
+
+    #[test]
+    fn an_unresolved_reference_in_a_map_pair_keeps_its_place() {
+        // A native `/Script` class: never resolved to a game asset path.
+        let imports = vec![json!({
+            "ClassName": "Class",
+            "ObjectName": "NativeThing",
+            "OuterIndex": 0,
+        })];
+        let data = json!({
+            "List": ["Reference: 0", "Reference: -1", 3],
+            "Map": [["Rifle", "Reference: 0"], ["Pistol", "Reference: -1"], ["Ammo", 2]],
+        });
+
+        for full_extraction in [false, true] {
+            let processed = process_data(&data, &[None], &[], &imports, full_extraction);
+
+            assert_eq!(processed["List"], json!([3]), "{full_extraction}");
+            assert_eq!(
+                processed["Map"],
+                json!([["Rifle", null], ["Pistol", null], ["Ammo", 2]]),
+                "{full_extraction}"
+            );
+        }
+    }
 
     /// A `HashMap`-backed loader standing in for real files on disk in
     /// tests, keyed by `/Game/...` object path.
