@@ -366,13 +366,6 @@ fn embedded_png_at(file_bytes: &[u8], sig_offset: usize, max_side: u32) -> Optio
         .then_some(png)
 }
 
-/// Finds every byte offset of `PNG_MAGIC` inside `haystack`.
-fn find_png_magic_offsets(haystack: &[u8]) -> Vec<usize> {
-    (0..haystack.len().saturating_sub(PNG_MAGIC.len()))
-        .filter(|&i| haystack[i..i + PNG_MAGIC.len()] == PNG_MAGIC)
-        .collect()
-}
-
 /// Cooked `FTexturePlatformData` pixel formats this module knows how to
 /// decode. Restricted to formats seen in real assets (see
 /// `decode_compressed_mip0`'s doc comment) -- `PF_BC4`/`PF_BC6H` etc. are
@@ -1118,7 +1111,7 @@ pub fn uasset_to_image(path: &Path, max_side: u32) -> anyhow::Result<image::Dyna
 
     let mut png_error = None;
     let mut decode_attempts = 0;
-    for sig_offset in find_png_magic_offsets(&file_bytes) {
+    for sig_offset in memchr::memmem::find_iter(&file_bytes, &PNG_MAGIC) {
         let Some(png_bytes) = embedded_png_at(&file_bytes, sig_offset, max_side) else {
             continue;
         };
