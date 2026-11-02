@@ -111,6 +111,9 @@ fs_assets.add_mod(
     progress=lambda stage, done, total: print(stage, done, total),
 )
 
+# The game's Paks directory in the local Steam install, or None if not found.
+paks = fs_assets.get_default_pak_directory()
+
 coverage = fs_assets.pak_coverage(catalog="catalog.json", pak="IconMod.pak")
 for template in fs_assets.read_templates("templates.h5", 1080):
     print(template["code"], template["mod_name"], template["crated"])

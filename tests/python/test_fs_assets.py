@@ -248,6 +248,16 @@ def test_package_exports_every_native_function():
         assert callable(getattr(fs_assets, name)), name
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows finds Steam in the registry")
+def test_get_default_pak_directory_finds_a_steam_install(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    paks = tmp_path / ".local/share/Steam/steamapps/common/Foxhole/War/Content/Paks"
+    paks.mkdir(parents=True)
+    (paks / "War-WindowsNoEditor.pak").touch()
+
+    assert fs_assets.get_default_pak_directory() == paks
+
+
 def test_add_mod_accepts_several_paks(tmp_path):
     first = _icon_mod_pak(tmp_path / "a")
     second = _icon_mod_pak(tmp_path / "b")

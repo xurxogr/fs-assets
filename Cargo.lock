@@ -422,6 +422,7 @@ dependencies = [
  "texture2ddecoder",
  "unreal_asset",
  "walkdir",
+ "winreg",
 ]
 
 [[package]]

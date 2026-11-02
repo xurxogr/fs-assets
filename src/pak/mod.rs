@@ -8,6 +8,9 @@ use repak::PakBuilder;
 
 use crate::atomic_write;
 
+mod locate;
+pub use locate::default_pak_directory;
+
 /// Lists every file path recorded in `pak`'s index.
 pub fn list(pak: &Path) -> anyhow::Result<Vec<String>> {
     let mut file =

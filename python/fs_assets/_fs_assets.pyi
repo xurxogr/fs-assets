@@ -1,6 +1,7 @@
 """Type stubs for the native ``fs_assets._fs_assets`` extension."""
 
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from fs_assets.types import (
@@ -34,6 +35,7 @@ __all__ = [
     "locres_dump",
     "locres_pack",
     "grep_strings",
+    "get_default_pak_directory",
     "version",
     "cli_main",
 ]
@@ -109,5 +111,6 @@ def locres_pack(input: StrPath, output: StrPath) -> None: ...
 def grep_strings(
     pattern: str, content_dir: StrPath, *, progress: ProgressCallback | None = None
 ) -> list[StringMatch]: ...
+def get_default_pak_directory() -> Path | None: ...
 def version() -> str: ...
 def cli_main(argv: list[str]) -> int: ...

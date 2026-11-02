@@ -759,6 +759,16 @@ fn database_statistics(py: Python<'_>, db: PathBuf) -> PyResult<Py<PyAny>> {
     Ok(result.into_any().unbind())
 }
 
+/// Find the directory holding the game's `.pak` files in the local Steam
+/// install, in any of Steam's libraries.
+///
+/// Returns:
+///     The directory as a `pathlib.Path`, or `None` when it isn't found.
+#[pyfunction]
+fn get_default_pak_directory() -> Option<PathBuf> {
+    crate::pak::default_pak_directory()
+}
+
 /// Get the crate version.
 #[pyfunction]
 fn version() -> &'static str {
@@ -810,6 +820,7 @@ fn _fs_assets(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(locres_dump, m)?)?;
     m.add_function(wrap_pyfunction!(locres_pack, m)?)?;
     m.add_function(wrap_pyfunction!(grep_strings, m)?)?;
+    m.add_function(wrap_pyfunction!(get_default_pak_directory, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(cli_main, m)?)?;
     // Fails when the embedding process already installed a logger.
