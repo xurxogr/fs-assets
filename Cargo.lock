@@ -1373,7 +1373,7 @@ checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 [[package]]
 name = "unreal_asset"
 version = "0.1.16"
-source = "git+https://github.com/xurxogr/unrealmodding?rev=0300a3d2f1e527ee52255e764121c8278290785a#0300a3d2f1e527ee52255e764121c8278290785a"
+source = "git+https://github.com/xurxogr/unrealmodding?rev=b6d67e50191a568a32bd562ec23216e843daac53#b6d67e50191a568a32bd562ec23216e843daac53"
 dependencies = [
  "bitflags 1.3.2",
  "bitvec",
@@ -1395,7 +1395,7 @@ dependencies = [
 [[package]]
 name = "unreal_asset_proc_macro"
 version = "0.1.16"
-source = "git+https://github.com/xurxogr/unrealmodding?rev=0300a3d2f1e527ee52255e764121c8278290785a#0300a3d2f1e527ee52255e764121c8278290785a"
+source = "git+https://github.com/xurxogr/unrealmodding?rev=b6d67e50191a568a32bd562ec23216e843daac53#b6d67e50191a568a32bd562ec23216e843daac53"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1405,7 +1405,7 @@ dependencies = [
 [[package]]
 name = "unreal_helpers"
 version = "0.1.16"
-source = "git+https://github.com/xurxogr/unrealmodding?rev=0300a3d2f1e527ee52255e764121c8278290785a#0300a3d2f1e527ee52255e764121c8278290785a"
+source = "git+https://github.com/xurxogr/unrealmodding?rev=b6d67e50191a568a32bd562ec23216e843daac53#b6d67e50191a568a32bd562ec23216e843daac53"
 dependencies = [
  "bitvec",
  "byteorder",
