@@ -837,19 +837,26 @@ fn expected_block_payload_len(format: CompressedPixelFormat, width: i32, height:
 /// `uasset_to_png`'s existing best-effort re-parse for the embedded-PNG
 /// path above it. It parses the `bytes` the caller already read from `path`,
 /// not the file again.
+///
+/// Resolving an export's class still reads `unreal_asset` structures built
+/// from the file, so a panic there counts as "no range", like a failed parse.
 fn find_texture2d_export_range(path: &Path, bytes: &[u8]) -> Option<(usize, usize)> {
-    let asset = parse_asset(std::io::Cursor::new(bytes), path).ok()?;
+    catch_unwind_quietly(|| {
+        let asset = parse_asset(std::io::Cursor::new(bytes), path).ok()?;
 
-    for export in &asset.asset_data.exports {
-        let base = export.get_base_export();
-        let class_name = base.get_class_type_for_ancestry(&asset);
-        if fname_to_string(&class_name) == "Texture2D" {
-            let start = base.serial_offset.max(0) as usize;
-            let size = base.serial_size.max(0) as usize;
-            return Some((start, start.saturating_add(size)));
+        for export in &asset.asset_data.exports {
+            let base = export.get_base_export();
+            let class_name = base.get_class_type_for_ancestry(&asset);
+            if fname_to_string(&class_name) == "Texture2D" {
+                let start = base.serial_offset.max(0) as usize;
+                let size = base.serial_size.max(0) as usize;
+                return Some((start, start.saturating_add(size)));
+            }
         }
-    }
-    None
+        None
+    })
+    .ok()
+    .flatten()
 }
 
 /// Decodes the largest (mip 0) level of a real cooked, BC/DXT-compressed
