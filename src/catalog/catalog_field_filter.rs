@@ -60,7 +60,29 @@ const NOISE_FIELDS: &[&str] = &[
     "DefaultTreadTime",
     "bInterpolatePitch",
     "bUsesImpactsMaterial",
+    "BlockedImpactEffectClass",
+    "ChargedImpactEffectClass",
+    "DefaultImpactEffectClass",
+    "FXTemplateClass",
+    "FireCameraShake",
+    "GhostMaterial",
+    "GhostMaterialIndices",
+    "ImpactEffect",
+    "ParticleComp",
+    "WeaponFireFXClass",
+    // Audio
+    "LoopingAudio",
+    // Animation
+    "ActivityMontage",
+    "AnimClass",
+    "DeployMontage",
+    "DeployMontageSection",
+    "EquippedGripType",
+    "ParachuteAnimClass",
+    // Engine ticking
+    "PrimaryComponentTick",
     // UI presentation
+    "AimLineThickness",
     "ScreenToUse",
     "MapIconType",
     // Physics rig, sockets and placement offsets
@@ -73,14 +95,30 @@ const NOISE_FIELDS: &[&str] = &[
     "Engines",
     "FuelTankerInfo",
     "GrindingCapsule",
+    "GroundItemOffset",
+    "HammerHeadSocketName",
+    "IdleFlameFXOffset",
     "Masses",
+    "MeshAttachSocket",
+    "MeshOffset",
+    "MeshRotation",
     "MuzzleInfo",
+    "MuzzleSocketName",
     "PassengerArea",
     "PowerSocket",
     "PropellerPositions",
     "RudderPivot",
     "Surfaces",
     "Wheels",
+];
+
+/// Asset folders that only hold presentation: a value pointing into one of
+/// them is noise whatever its field is called (e.g. a `Horn` that is just its
+/// sound, while a `Horn` object keeps its `CooldownSeconds`).
+const PRESENTATION_PATH_PREFIXES: &[&str] = &[
+    "War/Content/Audio/",
+    "War/Content/Animation/",
+    "War/Content/Materials/",
 ];
 
 /// Fields that are noise only when their value starts with the given prefix:
@@ -105,6 +143,7 @@ fn strip_noise(value: &Value) -> Value {
         Value::Object(m) => Value::Object(strip_noise_from_map(m)),
         Value::Array(a) => Value::Array(
             a.iter()
+                .filter(|v| !is_presentation_path(v))
                 .map(strip_noise)
                 .filter(|v| !is_empty_slot(v))
                 .collect(),
@@ -151,13 +190,24 @@ fn is_noise(key: &str) -> bool {
         .any(|suffix| stem.ends_with(suffix))
 }
 
-/// Whether a field is noise because of its value: the game's empty value, or
-/// e.g. a data-table row's `ObjectPath` pointing at the table itself.
+/// Whether a value is a path to a presentation-only asset.
+fn is_presentation_path(value: &Value) -> bool {
+    value.as_str().is_some_and(|text| {
+        PRESENTATION_PATH_PREFIXES
+            .iter()
+            .any(|prefix| text.starts_with(prefix))
+    })
+}
+
+/// Whether a field is noise because of its value: the game's empty value, a
+/// presentation asset, or e.g. a data-table row's `ObjectPath` pointing at the
+/// table itself.
 fn is_noise_value(key: &str, value: &Value) -> bool {
     let Some(text) = value.as_str() else {
         return false;
     };
     text == EMPTY_VALUE
+        || is_presentation_path(value)
         || NOISE_FIELD_VALUE_PREFIXES
             .iter()
             .any(|(field, prefix)| *field == key && text.starts_with(prefix))
@@ -305,6 +355,99 @@ mod tests {
             filter_noise(&[entry]),
             vec![json!({"CodeName": "FacilityVehicleFactory1"})]
         );
+    }
+
+    #[test]
+    fn removes_presentation_fields_of_an_item_component() {
+        let entry = json!({
+            "CodeName": "RifleW",
+            "FXTemplateClass": "War/Content/Blueprints/Data/VehicleFX/BPVehicleFX.0",
+            "ItemComponentClass": {
+                "ObjectPath": "War/Content/Blueprints/Items/RifleComponent.0",
+                "ActivityStateInfos": {"ActivityMontage": "Reload.0", "Duration": 0.5},
+                "AimLineThickness": 0.1,
+                "AnimClass": "ABP_Rifle.0",
+                "BlockedImpactEffectClass": "BayonetBlockedImpact.0",
+                "ChargedImpactEffectClass": "BayonetChargedImpact.0",
+                "CompatibleAmmoCodeName": "RifleAmmo",
+                "DefaultImpactEffectClass": "BayonetImpactEffect.0",
+                "DeployMontage": "Deploy.0",
+                "DeployMontageSection": "Default",
+                "EquippedGripType": "EEquippedWeaponGripType::Rifle",
+                "FireCameraShake": "RifleFireCameraShake.0",
+                "GhostMaterial": "M_Ghost.0",
+                "GhostMaterialIndices": 5,
+                "GroundItemOffset": {"X": 200},
+                "HammerHeadSocketName": "S_HammerHead",
+                "IdleFlameFXOffset": {"X": 5},
+                "ImpactEffect": "RifleImpactEffect.0",
+                "MeshAttachSocket": "EMeshSocket::Chest",
+                "MeshOffset": {"X": 1},
+                "MeshRotation": {"Pitch": 175},
+                "MuzzleSocketName": "S_Muzzle",
+                "ParachuteAnimClass": "ABP_Parachute.0",
+                "PrimaryComponentTick": true,
+                "ProjectileClass": {
+                    "AutoDetonateTime": 0.9,
+                    "LoopingAudio": "Loop.0",
+                    "ParticleComp": "Particles",
+                },
+                "WeaponFireFXClass": "TracerFire.0",
+            },
+        });
+        assert_eq!(
+            filter_noise(&[entry]),
+            vec![json!({
+                "CodeName": "RifleW",
+                "ItemComponentClass": {
+                    "ObjectPath": "War/Content/Blueprints/Items/RifleComponent.0",
+                    "ActivityStateInfos": {"Duration": 0.5},
+                    "CompatibleAmmoCodeName": "RifleAmmo",
+                    "ProjectileClass": {"AutoDetonateTime": 0.9},
+                },
+            })]
+        );
+    }
+
+    #[test]
+    fn removes_audio_animation_and_material_paths_under_any_name() {
+        let entry = json!({
+            "CodeName": "AmbulanceW",
+            "Horn": "War/Content/Audio/SFX/Vehicles/AmbulanceHorn_Cue.0",
+            "NewAnimation": "War/Content/Animation/Character/Reloading.0",
+            "NewMaterial": "War/Content/Materials/Structures/M_Clipped.0",
+        });
+        assert_eq!(
+            filter_noise(&[entry]),
+            vec![json!({"CodeName": "AmbulanceW"})]
+        );
+    }
+
+    #[test]
+    fn removes_presentation_paths_inside_a_list() {
+        let entry = json!({
+            "CodeName": "RifleW",
+            "Montages": ["War/Content/Animation/Character/Reloading.0"],
+            "GrenadeClasses": ["War/Content/Blueprints/Items/BPGrenadeW.0"],
+        });
+        assert_eq!(
+            filter_noise(&[entry]),
+            vec![json!({
+                "CodeName": "RifleW",
+                "GrenadeClasses": ["War/Content/Blueprints/Items/BPGrenadeW.0"],
+            })]
+        );
+    }
+
+    #[test]
+    fn keeps_a_horn_with_gameplay_data_and_other_asset_paths() {
+        let entry = json!({
+            "CodeName": "AmbulanceW",
+            "Icon": "War/Content/Textures/UI/VehicleIcons/AmbulanceIcon.0",
+            "Horn": {"CooldownSeconds": 8},
+            "ExplosionClass": "War/Content/Blueprints/Items/BPExplosion.0",
+        });
+        assert_eq!(filter_noise(std::slice::from_ref(&entry)), vec![entry]);
     }
 
     #[test]
