@@ -683,23 +683,45 @@ fn add_ammo_and_damage_type(
     }
 }
 
-/// Adds the item's `ProductionCategories`, if any.
+/// Adds the entry's `ProductionCategories`, if any: those listed by the
+/// factory blueprints, plus the Mass Production Factory queue of a vehicle or
+/// structure.
 fn add_production_categories(
     data: &mut Map<String, Value>,
     code_name: &str,
     production_categories: &HashMap<String, HashMap<String, String>>,
 ) {
-    if let Some(categories) =
+    let mut categories: Map<String, Value> =
         data_table_lookup::get_production_categories(production_categories, code_name)
-    {
-        let categories = categories
-            .iter()
+            .into_iter()
+            .flatten()
             .map(|(k, v)| (k.clone(), json!(v)))
             .collect();
+    if let Some(queue) = mass_production_queue(data) {
+        categories
+            .entry("MassProductionFactory")
+            .or_insert_with(|| json!(queue));
+    }
+    if !categories.is_empty() {
         data.insert(
             "ProductionCategories".to_string(),
             Value::Object(categories),
         );
+    }
+}
+
+/// The Mass Production Factory queue of a vehicle or structure. The factory
+/// blueprint does not list these: it offers the vehicles built at a Vehicle
+/// Factory or Shipyard and the structures built at a Construction Yard.
+fn mass_production_queue(data: &Map<String, Value>) -> Option<&'static str> {
+    let build_type = data.get("VehicleBuildType").and_then(Value::as_str);
+    let location = data.get("BuildLocationType").and_then(Value::as_str);
+    match (build_type, location) {
+        (Some("EVehicleBuildType::VehicleFactory" | "EVehicleBuildType::Shipyard"), _) => {
+            Some("EFactoryQueueType::Vehicles")
+        }
+        (_, Some("EBuildLocationType::ConstructionYard")) => Some("EFactoryQueueType::Structures"),
+        _ => None,
     }
 }
 
@@ -1614,7 +1636,131 @@ mod tests {
             assert_eq!(result["StockpileCategory"], json!("Vehicles"));
             assert_eq!(result["bIsStockpilable"], json!(true));
             assert_eq!(result["bIsCratable"], json!(true));
-            assert!(result.get("ProductionCategories").is_none());
+        }
+
+        /// The `ProductionCategories` an entry with `properties` ends up with.
+        fn production_categories_of(object_path: &str, properties: Value) -> Option<Value> {
+            let mut properties = properties;
+            properties["CodeName"] = json!("TestEntry");
+            properties["DisplayName"] = json!("Test Entry");
+            properties["Icon"] = json!("icon.png");
+            let asset = default_blueprint_asset(properties);
+            let loc = temp_loc_service();
+            let prod_cats = HashMap::new();
+            let blueprints = Blueprints::new(&no_loader, false);
+            let ctx = empty_ctx(&blueprints, &loc, &prod_cats);
+            assemble_catalog_entry(object_path, &asset, &ctx)
+                .unwrap()
+                .get("ProductionCategories")
+                .cloned()
+        }
+
+        #[test]
+        fn vehicles_built_at_a_factory_or_shipyard_are_mass_produced() {
+            for build_type in [
+                "EVehicleBuildType::VehicleFactory",
+                "EVehicleBuildType::Shipyard",
+            ] {
+                assert_eq!(
+                    production_categories_of(
+                        "/Game/Blueprints/Vehicles/BPTest",
+                        json!({"VehicleBuildType": build_type}),
+                    ),
+                    Some(json!({"MassProductionFactory": "EFactoryQueueType::Vehicles"})),
+                    "{build_type}"
+                );
+            }
+        }
+
+        #[test]
+        fn other_vehicles_are_not_mass_produced() {
+            for build_type in [
+                "EVehicleBuildType::AircraftFactory",
+                "EVehicleBuildType::VehicleFacility",
+                "EVehicleBuildType::BuildableAnywhere",
+                "EVehicleBuildType::NotBuildable",
+            ] {
+                assert_eq!(
+                    production_categories_of(
+                        "/Game/Blueprints/Vehicles/BPTest",
+                        json!({"VehicleBuildType": build_type}),
+                    ),
+                    None,
+                    "{build_type}"
+                );
+            }
+            assert_eq!(
+                production_categories_of(
+                    "/Game/Blueprints/Vehicles/BPTest",
+                    json!({"ShippableInfo": {
+                        "Type": "EShippableType::Large",
+                        "bAllowPackagingToCrate": true,
+                    }}),
+                ),
+                None
+            );
+        }
+
+        #[test]
+        fn structures_built_at_a_construction_yard_are_mass_produced() {
+            assert_eq!(
+                production_categories_of(
+                    "/Game/Blueprints/Structures/BPTest",
+                    json!({"BuildLocationType": "EBuildLocationType::ConstructionYard"}),
+                ),
+                Some(json!({"MassProductionFactory": "EFactoryQueueType::Structures"}))
+            );
+        }
+
+        #[test]
+        fn other_structures_are_not_mass_produced() {
+            for location in [
+                "EBuildLocationType::Anywhere",
+                "EBuildLocationType::Facility",
+            ] {
+                assert_eq!(
+                    production_categories_of(
+                        "/Game/Blueprints/Structures/BPTest",
+                        json!({"BuildLocationType": location}),
+                    ),
+                    None,
+                    "{location}"
+                );
+            }
+        }
+
+        #[test]
+        fn mass_production_keeps_the_categories_of_the_factory_blueprints() {
+            let asset = default_blueprint_asset(json!({
+                "CodeName": "TestVehicle",
+                "DisplayName": "Test Vehicle",
+                "Icon": "icon.png",
+                "VehicleBuildType": "EVehicleBuildType::VehicleFactory",
+            }));
+            let loc = temp_loc_service();
+            let mut entry = HashMap::new();
+            entry.insert(
+                "Factory".to_string(),
+                "EFactoryQueueType::Utility".to_string(),
+            );
+            entry.insert(
+                "MassProductionFactory".to_string(),
+                "EFactoryQueueType::Utility".to_string(),
+            );
+            let mut prod_cats = HashMap::new();
+            prod_cats.insert("testvehicle".to_string(), entry);
+            let blueprints = Blueprints::new(&no_loader, false);
+            let ctx = empty_ctx(&blueprints, &loc, &prod_cats);
+
+            let result =
+                assemble_catalog_entry("/Game/Blueprints/Vehicles/BPTest", &asset, &ctx).unwrap();
+            assert_eq!(
+                result["ProductionCategories"],
+                json!({
+                    "Factory": "EFactoryQueueType::Utility",
+                    "MassProductionFactory": "EFactoryQueueType::Utility",
+                })
+            );
         }
 
         #[test]
