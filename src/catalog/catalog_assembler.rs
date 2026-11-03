@@ -287,18 +287,15 @@ pub fn enrich_locales(
             continue;
         }
 
-        let Some(guid) = data
+        let Some(key) = data
             .get(&key_field)
             .and_then(Value::as_str)
             .map(str::to_string)
         else {
             continue;
         };
-        if !localization::is_guid(&guid) {
-            continue;
-        }
 
-        let translations = loc_service.get_all_languages(&guid);
+        let translations = loc_service.get_all_languages(&key);
         if !translations.is_empty() {
             data.insert(locales_field, json!(translations));
         }
@@ -1123,14 +1120,33 @@ mod tests {
         }
 
         #[test]
-        fn invalid_guid_key_field_left_in_place() {
+        fn a_named_key_gets_its_translations() {
+            let tmp = tempfile::tempdir().unwrap();
+            let loc = super::resolve_chassis_name_tests::loc_service_with(
+                tmp.path(),
+                &[("de", "LightUtilityVehicle", "Leichtes Nutzfahrzeug")],
+            );
+            let mut data = Map::new();
+            data.insert("ChassisName".to_string(), json!("Light Utility Vehicle"));
+            data.insert("ChassisNameKey".to_string(), json!("LightUtilityVehicle"));
+            enrich_locales(&mut data, LOCALIZABLE_FIELDS, &loc);
+            assert!(!data.contains_key("ChassisNameKey"));
+            assert_eq!(
+                data["ChassisNameLocales"],
+                json!({"de": "Leichtes Nutzfahrzeug"})
+            );
+        }
+
+        #[test]
+        fn a_key_without_translations_is_dropped() {
             let loc = temp_loc_service();
             let mut data = Map::new();
             data.insert("DisplayName".to_string(), json!("Test"));
-            data.insert("DisplayNameKey".to_string(), json!("not-a-guid"));
+            data.insert("DisplayNameKey".to_string(), json!("UnknownKey"));
             enrich_locales(&mut data, LOCALIZABLE_FIELDS, &loc);
-            assert!(data.contains_key("DisplayNameKey"));
+            assert!(!data.contains_key("DisplayNameKey"));
             assert!(!data.contains_key("DisplayNameLocales"));
+            assert_eq!(data["DisplayName"], json!("Test"));
         }
     }
 
@@ -1600,7 +1616,7 @@ mod tests {
             let result =
                 assemble_catalog_entry("/Game/Blueprints/Items/BPTest", &asset, &ctx).unwrap();
             assert_eq!(result["CodeName"], json!("TestItem"));
-            assert_eq!(result["DisplayNameKey"], json!("GUID-ABC"));
+            assert!(result.get("DisplayNameKey").is_none());
             assert_eq!(result["DisplayName"], json!("Test Item"));
         }
 
@@ -1925,7 +1941,7 @@ mod tests {
         use super::*;
 
         /// A lookup over a `.locres` per `(language, key, text)`.
-        fn loc_service_with(
+        pub(super) fn loc_service_with(
             dir: &std::path::Path,
             strings: &[(&str, &str, &str)],
         ) -> LocalizationLookup {
