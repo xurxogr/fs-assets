@@ -1,6 +1,6 @@
 [package]
 name = "fs-assets"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 # The oldest compiler that builds it (`File::try_lock`), checked with `cargo +1.89 check`.
 rust-version = "1.89"
@@ -79,7 +79,8 @@ tempfile = "3"
 ctrlc = "3"
 # Warnings about inputs a run skips (an asset that fails to parse, an icon
 # that fails to decode): the binary prints them to stderr, the Python module
-# hands them to its `logging`.
+# hands them to its `logging`, along with debug detail such as why repak
+# rejected a pak.
 log = "0.4"
 # Python bindings (optional), mirroring fs-sav/fs-ocr's `python` feature.
 pyo3 = { version = "0.30.1", features = ["extension-module", "abi3-py310"], optional = true }
