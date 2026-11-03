@@ -23,6 +23,7 @@ use crate::catalog::data_table_lookup::{
     self, filesystem_blueprint_loader, filesystem_data_loader,
 };
 use crate::catalog::localization::LocalizationLookup;
+use crate::catalog::utils;
 use crate::convert;
 
 /// Subdirectories of `Blueprints/` recursively scanned for catalog
@@ -326,7 +327,9 @@ pub fn build_catalog_from_extract_dir_with_progress(
         if !catalog_assembler::filter_blueprint_by_content(&entry) {
             continue;
         }
-        catalog.push(catalog_assembler::clean_entry(&entry));
+        let mut entry = catalog_assembler::clean_entry(&entry);
+        utils::drop_whole_decimals(&mut entry);
+        catalog.push(entry);
         stats.stockpilable += 1;
     }
     progress(files.len(), files.len())?;
@@ -634,6 +637,21 @@ mod tests {
                 "War/Content/Textures/UI/ItemIcons/T_Rifle.uasset"
             ));
             assert!(!is_catalog_input("War/Content/BlueprintsExtra/Foo.uasset"));
+        }
+
+        #[test]
+        fn invalid_pak_fails_on_one_line_naming_it() {
+            let tmp = tempfile::tempdir().unwrap();
+            let bad = tmp.path().join("bad.pak");
+            fs::write(&bad, [0xde; 4096]).unwrap();
+
+            let message =
+                build_catalog_from_pak_with_progress(&bad, &|_, _| Ok(()), &|_, _| Ok(()))
+                    .unwrap_err()
+                    .to_string();
+
+            assert!(message.contains(&bad.display().to_string()), "{message}");
+            assert_eq!(message.lines().count(), 1, "{message}");
         }
 
         #[test]

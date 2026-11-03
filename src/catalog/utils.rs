@@ -97,6 +97,28 @@ pub(crate) fn is_truthy(value: &Value) -> bool {
 /// `i64::MIN` (-2^63) as a float, exactly; 2^63 is its negation.
 const I64_MIN_F64: f64 = i64::MIN as f64;
 
+/// `f` as an integer if it has no decimals. `as i64` saturates, so a whole
+/// float outside the `i64` range (UE's `FLT_MAX` "no limit" defaults) stays
+/// the float it is; those are written in exponent form, without a `.0`.
+fn whole_float_as_int(f: f64) -> Option<i64> {
+    (f == f.trunc() && (I64_MIN_F64..-I64_MIN_F64).contains(&f)).then_some(f as i64)
+}
+
+/// Turn every whole float under `value` into an integer, at any nesting
+/// level, so it isn't written with a trailing `.0`. Strings are left alone.
+pub fn drop_whole_decimals(value: &mut Value) {
+    match value {
+        Value::Number(n) if n.is_f64() => {
+            if let Some(whole) = n.as_f64().and_then(whole_float_as_int) {
+                *value = json!(whole);
+            }
+        }
+        Value::Object(map) => map.values_mut().for_each(drop_whole_decimals),
+        Value::Array(items) => items.iter_mut().for_each(drop_whole_decimals),
+        _ => {}
+    }
+}
+
 /// Simplify extracted values.
 ///
 /// - Convert floats to ints if they're whole numbers
@@ -115,13 +137,7 @@ pub fn simplify_value(value: &Value) -> Value {
             } else {
                 f
             };
-            // `as i64` saturates, so a whole float outside the `i64` range
-            // (UE's `FLT_MAX` "no limit" defaults) stays the float it is.
-            if rounded == rounded.trunc() && (I64_MIN_F64..-I64_MIN_F64).contains(&rounded) {
-                json!(rounded as i64)
-            } else {
-                json!(rounded)
-            }
+            whole_float_as_int(rounded).map_or_else(|| json!(rounded), |whole| json!(whole))
         }
         // A signed integer string becomes a number, unless it doesn't fit an
         // `i64`, in which case it is kept as the string it was.
@@ -460,6 +476,57 @@ mod tests {
         fn keeps_regular_string() {
             let result = simplify_value(&json!("hello"));
             assert_eq!(result, json!("hello"));
+        }
+    }
+
+    mod drop_whole_decimals_tests {
+        use super::*;
+
+        fn dropped(mut value: Value) -> Value {
+            drop_whole_decimals(&mut value);
+            value
+        }
+
+        #[test]
+        fn converts_whole_floats_at_any_depth() {
+            let result = dropped(json!({
+                "Top": 5.0,
+                "Nested": {"Deep": [1.0, {"Deeper": -2.0}]},
+                "Pairs": [[3.0, 4.0]],
+            }));
+            assert_eq!(
+                result,
+                json!({
+                    "Top": 5,
+                    "Nested": {"Deep": [1, {"Deeper": -2}]},
+                    "Pairs": [[3, 4]],
+                })
+            );
+            assert_eq!(serde_json::to_string(&dropped(json!(5.0))).unwrap(), "5");
+        }
+
+        #[test]
+        fn negative_zero_is_written_as_zero() {
+            assert_eq!(serde_json::to_string(&dropped(json!(-0.0))).unwrap(), "0");
+        }
+
+        #[test]
+        fn keeps_decimals_ints_and_other_values() {
+            let value = json!({"Decimal": 0.25, "Int": 7, "On": true, "Null": null});
+            assert_eq!(dropped(value.clone()), value);
+        }
+
+        #[test]
+        fn keeps_strings_that_look_like_whole_floats() {
+            let value = json!({"Version": "5.0", "List": ["1.0"]});
+            assert_eq!(dropped(value.clone()), value);
+        }
+
+        #[test]
+        fn keeps_whole_floats_outside_the_i64_range() {
+            let max = f64::from(f32::MAX);
+            assert_eq!(dropped(json!(max)), json!(max));
+            assert_eq!(dropped(json!(1e19)), json!(1e19));
         }
     }
 
