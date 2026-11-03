@@ -3,8 +3,9 @@
 //! Removes fields that carry no usable information about an entry: audio,
 //! visual effects, meshes, engine components, collision/socket locations,
 //! camera curves, networking settings and serialization metadata. Gameplay
-//! data (damage, costs, production, health, etc.) is kept. The full entries
-//! remain available on demand (`--full`).
+//! data (damage, costs, production, health, etc.) is kept, and nested localized
+//! values are reduced to their text. The full entries remain available on
+//! demand (`--full`).
 
 use serde_json::{Map, Value};
 
@@ -83,6 +84,10 @@ const NOISE_FIELDS: &[&str] = &[
     "PrimaryComponentTick",
     // UI presentation
     "AimLineThickness",
+    "EndTaskText",
+    "NoAmmoText",
+    "NoTargetText",
+    "StartTaskText",
     "ScreenToUse",
     "MapIconType",
     // Physics rig, sockets and placement offsets
@@ -139,6 +144,9 @@ pub fn filter_noise(catalog: &[Value]) -> Vec<Value> {
 
 /// `value` without its noise fields, as [`filter_noise`] leaves an entry.
 fn strip_noise(value: &Value) -> Value {
+    if let Some(text) = localized_text(value) {
+        return Value::String(text.to_string());
+    }
     match value {
         Value::Object(m) => Value::Object(strip_noise_from_map(m)),
         Value::Array(a) => Value::Array(
@@ -150,6 +158,16 @@ fn strip_noise(value: &Value) -> Value {
         ),
         other => other.clone(),
     }
+}
+
+/// The text of a nested localized value (`{"Guid": ..., "Text": ...}`). The
+/// fields translated at the top level of an entry are already plain text.
+fn localized_text(value: &Value) -> Option<&str> {
+    let fields = value.as_object()?;
+    if fields.len() != 2 || !fields.contains_key("Guid") {
+        return None;
+    }
+    fields.get("Text")?.as_str()
 }
 
 fn strip_noise_from_map(data: &Map<String, Value>) -> Map<String, Value> {
@@ -446,6 +464,59 @@ mod tests {
             "Icon": "War/Content/Textures/UI/VehicleIcons/AmbulanceIcon.0",
             "Horn": {"CooldownSeconds": 8},
             "ExplosionClass": "War/Content/Blueprints/Items/BPExplosion.0",
+        });
+        assert_eq!(filter_noise(std::slice::from_ref(&entry)), vec![entry]);
+    }
+
+    #[test]
+    fn removes_task_messages() {
+        let entry = json!({
+            "CodeName": "TraumaKit",
+            "ItemComponentClass": {
+                "EndTaskText": "",
+                "HealAmountPerApplication": 12,
+                "NoAmmoText": {"Guid": "82DCBA4C", "Text": "Out of Blood Plasma"},
+                "NoTargetText": {"Guid": "AEA3035D", "Text": "No one to revive..."},
+                "StartTaskText": {"Guid": "2234EB4E", "Text": "Reviving..."},
+            },
+        });
+        assert_eq!(
+            filter_noise(&[entry]),
+            vec![json!({
+                "CodeName": "TraumaKit",
+                "ItemComponentClass": {"HealAmountPerApplication": 12},
+            })]
+        );
+    }
+
+    #[test]
+    fn flattens_nested_localized_text() {
+        let entry = json!({
+            "WeaponConfigs": [{
+                "DisplayName": {"Guid": "BB99173B", "Text": "Machine Gun"},
+                "MaxAmmo": 40,
+            }],
+            "ItemComponentClass": {
+                "SingleShotDisplayName": {"Guid": "7AC7D1C8", "Text": "Storm Rifle S"},
+            },
+            "DescriptionDetails": [{"Text": {"Guid": "65F03D9E", "Text": "Destroys obstacles"}}],
+        });
+        assert_eq!(
+            filter_noise(&[entry]),
+            vec![json!({
+                "WeaponConfigs": [{"DisplayName": "Machine Gun", "MaxAmmo": 40}],
+                "ItemComponentClass": {"SingleShotDisplayName": "Storm Rifle S"},
+                "DescriptionDetails": [{"Text": "Destroys obstacles"}],
+            })]
+        );
+    }
+
+    #[test]
+    fn keeps_objects_that_are_not_just_a_localized_text() {
+        let entry = json!({
+            "Extra": {"Guid": "BB99173B", "Text": "Machine Gun", "Quantity": 2},
+            "OnlyGuid": {"Guid": "BB99173B"},
+            "NonTextValue": {"Guid": "BB99173B", "Text": 5},
         });
         assert_eq!(filter_noise(std::slice::from_ref(&entry)), vec![entry]);
     }
