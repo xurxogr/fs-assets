@@ -70,6 +70,9 @@ pub const SHIP_DYNAMIC_DATA: &str = "BPShipDynamicData";
 pub const FACTORY_BLUEPRINT: &str = "Structures/BPFactory";
 pub const MASS_PRODUCTION_BLUEPRINT: &str = "Structures/BPMassProduction";
 
+/// String table of the chassis names, relative to the Blueprints folder.
+pub const CHASSIS_STRING_TABLE: &str = "StringTables/STChassis";
+
 // ---------------------------------------------------------------------
 // Data table row lookup
 // ---------------------------------------------------------------------
@@ -390,6 +393,21 @@ pub fn get_production_categories<'a>(
         return None;
     }
     categories.get(&code_name.to_lowercase())
+}
+
+/// Parse the `key -> source text` entries of a string table asset. An asset
+/// with no string table export yields an empty map.
+pub fn parse_string_table(asset: &Value) -> HashMap<String, String> {
+    asset
+        .get("exports")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|export| export.get("kind").and_then(Value::as_str) == Some("string_table"))
+        .filter_map(|export| export.get("entries").and_then(Value::as_object))
+        .flatten()
+        .filter_map(|(key, text)| Some((key.clone(), text.as_str()?.to_string())))
+        .collect()
 }
 
 // ---------------------------------------------------------------------
@@ -912,6 +930,36 @@ mod tests {
         }
     }
 
+    mod parse_string_table_tests {
+        use super::*;
+        use serde_json::json;
+
+        #[test]
+        fn reads_the_entries_of_the_string_table_export() {
+            let asset = json!({"exports": [
+                {"kind": "normal", "properties": {}},
+                {"kind": "string_table", "entries": {
+                    "ChassisRifle": "Rifle",
+                    "ChassisTruck": "Truck",
+                }},
+            ]});
+            let table = parse_string_table(&asset);
+            assert_eq!(table.len(), 2);
+            assert_eq!(table["ChassisRifle"], "Rifle");
+            assert_eq!(table["ChassisTruck"], "Truck");
+        }
+
+        #[test]
+        fn an_asset_without_a_string_table_yields_nothing() {
+            assert!(parse_string_table(&json!({})).is_empty());
+            assert!(parse_string_table(
+                &json!({"exports": [{"kind": "normal", "properties": {}}]})
+            )
+            .is_empty());
+        }
+    }
+
+    #[cfg(test)]
     mod filesystem_loader_tests {
         use super::*;
         use std::path::PathBuf;

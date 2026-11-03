@@ -299,14 +299,22 @@ fn export_to_value(export: &Export) -> Value {
             }
             map.insert("rows".to_string(), Value::Object(rows));
         }
+        Export::StringTableExport(string_table) => {
+            map.insert("kind".to_string(), json!("string_table"));
+            let entries = string_table
+                .table
+                .iter()
+                .map(|(_, key, text)| (key.clone(), json!(text)))
+                .collect();
+            map.insert("entries".to_string(), Value::Object(entries));
+        }
         Export::NormalExport(_)
         | Export::ClassExport(_)
         | Export::StructExport(_)
         | Export::PropertyExport(_)
         | Export::FunctionExport(_)
         | Export::EnumExport(_)
-        | Export::LevelExport(_)
-        | Export::StringTableExport(_) => {
+        | Export::LevelExport(_) => {
             map.insert("kind".to_string(), json!("normal"));
             if let Some(normal) = export.get_normal_export() {
                 map.insert(

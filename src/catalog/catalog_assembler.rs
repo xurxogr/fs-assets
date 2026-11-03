@@ -136,12 +136,14 @@ impl LoadedDataTables {
 
 /// Everything [`assemble_catalog_entry`] needs beyond the blueprint asset
 /// itself: the data tables, the merged production-categories map (see
-/// `data_table_lookup::load_production_categories`), the localization
-/// service, and the referenced blueprints.
+/// `data_table_lookup::load_production_categories`), the chassis string table
+/// (see `data_table_lookup::parse_string_table`), the localization service,
+/// and the referenced blueprints.
 pub struct AssemblerContext<'a> {
     pub blueprints: &'a Blueprints<'a>,
     pub tables: DataTables<'a>,
     pub production_categories: &'a HashMap<String, HashMap<String, String>>,
+    pub chassis_names: &'a HashMap<String, String>,
     pub loc_service: &'a LocalizationLookup,
 }
 
@@ -598,6 +600,7 @@ pub fn assemble_catalog_entry(
         .to_string();
 
     extract_localization_keys(&mut data, ctx.loc_service);
+    resolve_chassis_name(&mut data, ctx.chassis_names, ctx.loc_service);
     expand_data(&mut data, &code_name, &ctx.tables, ctx.blueprints);
 
     let empty_ammo_table;
@@ -643,6 +646,28 @@ fn extract_localization_keys(data: &mut Map<String, Value>, loc_service: &Locali
             }
             _ => {}
         }
+    }
+}
+
+/// Replaces a `ChassisName` that is a key of the chassis string table with its
+/// text, and adds its `ChassisNameLocales`. The translations share the key;
+/// a key without any keeps the table's own text.
+fn resolve_chassis_name(
+    data: &mut Map<String, Value>,
+    chassis_names: &HashMap<String, String>,
+    loc_service: &LocalizationLookup,
+) {
+    let Some(key) = data.get("ChassisName").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(source_text) = chassis_names.get(key) else {
+        return;
+    };
+    let translations = loc_service.get_all_languages(key);
+    let text = translations.get("en").unwrap_or(source_text);
+    data.insert("ChassisName".to_string(), json!(text));
+    if !translations.is_empty() {
+        data.insert("ChassisNameLocales".to_string(), json!(translations));
     }
 }
 
@@ -816,6 +841,9 @@ mod tests {
         None
     }
 
+    static NO_CHASSIS_NAMES: std::sync::LazyLock<HashMap<String, String>> =
+        std::sync::LazyLock::new(HashMap::new);
+
     fn temp_loc_service() -> LocalizationLookup {
         let tmp = std::env::temp_dir().join(format!(
             "fs-assets-catalog-assembler-test-{}-{}",
@@ -837,6 +865,7 @@ mod tests {
             blueprints,
             tables: DataTables::default(),
             production_categories: prod_cats,
+            chassis_names: &NO_CHASSIS_NAMES,
             loc_service: loc,
         }
     }
@@ -1864,6 +1893,7 @@ mod tests {
                 blueprints: &blueprints,
                 tables,
                 production_categories: &prod_cats,
+                chassis_names: &NO_CHASSIS_NAMES,
                 loc_service: &loc,
             };
 
@@ -1888,6 +1918,120 @@ mod tests {
                 assemble_catalog_entry("/Game/Blueprints/Items/BPTest", &asset, &ctx),
                 None
             );
+        }
+    }
+
+    mod resolve_chassis_name_tests {
+        use super::*;
+
+        /// A lookup over a `.locres` per `(language, key, text)`.
+        fn loc_service_with(
+            dir: &std::path::Path,
+            strings: &[(&str, &str, &str)],
+        ) -> LocalizationLookup {
+            for (language, key, text) in strings {
+                let path = dir.join("Game").join(language).join("Game.locres");
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                let document = crate::locres::LocresDocument {
+                    version: 2,
+                    namespaces: vec![crate::locres::LocresNamespace {
+                        namespace_hash: 0,
+                        namespace: "STChassis".to_string(),
+                        entries: vec![crate::locres::LocresEntry {
+                            key_hash: 0,
+                            key: key.to_string(),
+                            source_hash: 0,
+                            text: text.to_string(),
+                        }],
+                    }],
+                };
+                crate::locres::write(&document, &path).unwrap();
+            }
+            LocalizationLookup::new(dir, None)
+        }
+
+        fn names() -> HashMap<String, String> {
+            HashMap::from([
+                ("ChassisRifle".to_string(), "Source Rifle".to_string()),
+                ("ChassisArmouredCar".to_string(), "Armoured Car".to_string()),
+            ])
+        }
+
+        fn resolved(chassis_name: &str, loc: &LocalizationLookup) -> Map<String, Value> {
+            let mut data = Map::new();
+            data.insert("ChassisName".to_string(), json!(chassis_name));
+            resolve_chassis_name(&mut data, &names(), loc);
+            data
+        }
+
+        #[test]
+        fn a_key_becomes_its_text_and_translations() {
+            let tmp = tempfile::tempdir().unwrap();
+            let loc = loc_service_with(
+                tmp.path(),
+                &[
+                    ("en", "ChassisRifle", "Rifle"),
+                    ("de", "ChassisRifle", "Gewehr"),
+                ],
+            );
+            let data = resolved("ChassisRifle", &loc);
+            assert_eq!(data["ChassisName"], json!("Rifle"));
+            assert_eq!(
+                data["ChassisNameLocales"],
+                json!({"en": "Rifle", "de": "Gewehr"})
+            );
+        }
+
+        #[test]
+        fn a_key_without_translations_keeps_the_table_text() {
+            let tmp = tempfile::tempdir().unwrap();
+            let loc = loc_service_with(tmp.path(), &[]);
+            let data = resolved("ChassisArmouredCar", &loc);
+            assert_eq!(data["ChassisName"], json!("Armoured Car"));
+            assert!(!data.contains_key("ChassisNameLocales"));
+        }
+
+        #[test]
+        fn a_key_only_translated_elsewhere_keeps_the_table_text() {
+            let tmp = tempfile::tempdir().unwrap();
+            let loc = loc_service_with(tmp.path(), &[("de", "ChassisRifle", "Gewehr")]);
+            let data = resolved("ChassisRifle", &loc);
+            assert_eq!(data["ChassisName"], json!("Source Rifle"));
+            assert_eq!(data["ChassisNameLocales"], json!({"de": "Gewehr"}));
+        }
+
+        #[test]
+        fn plain_text_stays_untouched() {
+            let tmp = tempfile::tempdir().unwrap();
+            let loc = loc_service_with(tmp.path(), &[]);
+            let data = resolved("Emplaced Anti-Air Cannon", &loc);
+            assert_eq!(data["ChassisName"], json!("Emplaced Anti-Air Cannon"));
+            assert!(!data.contains_key("ChassisNameLocales"));
+        }
+
+        #[test]
+        fn assembling_an_entry_resolves_its_chassis_name() {
+            let tmp = tempfile::tempdir().unwrap();
+            let loc = loc_service_with(tmp.path(), &[("en", "ChassisRifle", "Rifle")]);
+            let asset = default_blueprint_asset(json!({
+                "CodeName": "RifleW",
+                "DisplayName": "Rifle",
+                "Icon": "icon.png",
+                "ChassisName": "ChassisRifle",
+            }));
+            let prod_cats = HashMap::new();
+            let chassis_names = names();
+            let blueprints = Blueprints::new(&no_loader, false);
+            let ctx = AssemblerContext {
+                chassis_names: &chassis_names,
+                ..empty_ctx(&blueprints, &loc, &prod_cats)
+            };
+
+            let result =
+                assemble_catalog_entry("/Game/Blueprints/ItemPickups/BPTest", &asset, &ctx)
+                    .unwrap();
+            assert_eq!(result["ChassisName"], json!("Rifle"));
+            assert_eq!(result["ChassisNameLocales"], json!({"en": "Rifle"}));
         }
     }
 

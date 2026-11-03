@@ -258,6 +258,15 @@ pub fn build_catalog_from_extract_dir_with_progress(
         factory_asset.as_ref(),
         mass_production_asset.as_ref(),
     );
+    let chassis_names = blueprint_file_loader(data_table_lookup::CHASSIS_STRING_TABLE)
+        .map(|asset| data_table_lookup::parse_string_table(&asset))
+        .unwrap_or_else(|| {
+            log::warn!(
+                "build-catalog: no {}: chassis names stay as keys",
+                data_table_lookup::CHASSIS_STRING_TABLE
+            );
+            Default::default()
+        });
 
     // One `Blueprints` for the whole build, so each shared ancestor (e.g. a
     // common base item) is parsed and extracted once rather than once per
@@ -269,6 +278,7 @@ pub fn build_catalog_from_extract_dir_with_progress(
         blueprints: &blueprints,
         tables,
         production_categories: &production_categories,
+        chassis_names: &chassis_names,
         loc_service: &loc_service,
     };
 
