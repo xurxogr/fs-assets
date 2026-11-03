@@ -24,9 +24,6 @@ const NON_CRATABLE_VEHICLES: &[&str] = &[
     "RelicMediumTank",
 ];
 
-/// Assembly stations ship in crates even though they are built anywhere.
-const CRATABLE_STRUCTURES: &[&str] = &["FacilityVehicleFactory1", "FacilityVehicleFactory2"];
-
 /// Stockpile category an entry is listed under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StockpileCategory {
@@ -133,15 +130,13 @@ fn classify_vehicle(data: &Map<String, Value>) -> StockpileRules {
 }
 
 /// Structures are only stockpilable when flagged, and cratable when built at
-/// a Construction Yard (plus the assembly stations).
+/// a Construction Yard.
 fn classify_structure(data: &Map<String, Value>) -> StockpileRules {
     let location = enum_member(data.get("BuildLocationType"));
-    let code_name = data.get("CodeName").and_then(Value::as_str).unwrap_or("");
     StockpileRules {
         category: StockpileCategory::Structures,
         stockpilable: is_true(data.get("bIsStockpilable")),
-        cratable: CRATABLE_STRUCTURE_BUILD_LOCATIONS.contains(&location)
-            || CRATABLE_STRUCTURES.contains(&code_name),
+        cratable: CRATABLE_STRUCTURE_BUILD_LOCATIONS.contains(&location),
     }
 }
 
@@ -320,10 +315,10 @@ mod tests {
     }
 
     #[test]
-    fn assembly_station_is_cratable() {
+    fn assembly_station_stays_out_of_the_catalog() {
         let data = map(
             json!({"CodeName": "FacilityVehicleFactory1", "BuildLocationType": "EBuildLocationType::Anywhere"}),
         );
-        assert!(classify(&data, StockpileCategory::Structures).cratable);
+        assert!(!classify(&data, StockpileCategory::Structures).included());
     }
 }
