@@ -120,6 +120,23 @@ mod tests {
     }
 
     #[test]
+    fn invalid_pak_error_names_the_bad_one_of_several() {
+        let tmp = tempfile::tempdir().unwrap();
+        let catalog = write_catalog(tmp.path());
+        let good = write_pak(tmp.path(), "good.pak", &[&format!("{RIFLE}.uasset")]);
+        let bad = tmp.path().join("bad.pak");
+        std::fs::write(&bad, [0xde; 4096]).unwrap();
+
+        let message = pak_coverage(&catalog, &[good.clone(), bad.clone()])
+            .unwrap_err()
+            .to_string();
+
+        assert!(message.contains(&bad.display().to_string()), "{message}");
+        assert!(!message.contains(&good.display().to_string()), "{message}");
+        assert_eq!(message.lines().count(), 1, "{message}");
+    }
+
+    #[test]
     fn missing_pak_is_an_error() {
         let tmp = tempfile::tempdir().unwrap();
         let catalog = write_catalog(tmp.path());

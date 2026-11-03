@@ -11,11 +11,44 @@ use crate::atomic_write;
 mod locate;
 pub use locate::default_pak_directory;
 
-/// Lists every file path recorded in `pak`'s index.
-pub fn list(pak: &Path) -> anyhow::Result<Vec<String>> {
+/// Opens `pak` and reads its index, returning the file its entries are read
+/// from along with the index. Every pak read goes through here.
+fn open_pak(pak: &Path) -> anyhow::Result<(BufReader<File>, repak::PakReader)> {
     let mut file =
         BufReader::new(File::open(pak).with_context(|| format!("opening {}", pak.display()))?);
-    let reader = PakBuilder::new().reader(&mut file)?;
+    let reader = PakBuilder::new()
+        .reader(&mut file)
+        .map_err(|error| invalid_pak(pak, &error))?;
+    Ok((file, reader))
+}
+
+/// The one-line error for a file repak can't read as a pak, logging what it
+/// reported at debug level. `error` is left out of the returned chain on
+/// purpose: its text is what stays out of the message, and an I/O error among
+/// its causes would make the Python API raise `OSError`.
+fn invalid_pak(pak: &Path, error: &repak::Error) -> anyhow::Error {
+    for line in failure_detail(error).lines().filter(|l| !l.is_empty()) {
+        log::debug!("{}: {line}", pak.display());
+    }
+    anyhow::anyhow!(
+        "{} is not a valid pak file (corrupt, encrypted or of an unsupported version)",
+        pak.display()
+    )
+}
+
+/// What repak reported: for a pak no version could read, one line per version
+/// tried, without the advice about the `--aes-key` option of repak's own CLI
+/// that the error's `Display` appends.
+fn failure_detail(error: &repak::Error) -> String {
+    match error {
+        repak::Error::UnsupportedOrEncrypted(versions) => versions.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Lists every file path recorded in `pak`'s index.
+pub fn list(pak: &Path) -> anyhow::Result<Vec<String>> {
+    let (_, reader) = open_pak(pak)?;
     let mut files = reader.files();
     files.sort();
     Ok(files)
@@ -121,9 +154,7 @@ pub fn extract_matching_within<F>(
 where
     F: Fn(&str) -> bool,
 {
-    let mut file =
-        BufReader::new(File::open(pak).with_context(|| format!("opening {}", pak.display()))?);
-    let reader = PakBuilder::new().reader(&mut file)?;
+    let (mut file, reader) = open_pak(pak)?;
 
     // Every destination is checked before anything is written. On a
     // case-insensitive filesystem (Windows, macOS) two entries differing only
@@ -471,6 +502,76 @@ mod tests {
             .unwrap();
         writer.write_index().unwrap();
         buf.into_inner()
+    }
+
+    const GARBAGE: &[u8] = &[0xde; 4096];
+
+    /// Asserts `error` is the single-line invalid-pak error naming `pak`.
+    fn assert_invalid_pak_error(error: &anyhow::Error, pak: &Path) {
+        let message = crate::cli::error_message(error);
+        assert!(message.contains(&pak.display().to_string()), "{message}");
+        assert_eq!(message.lines().count(), 1, "{message}");
+        assert_eq!(message, message.trim(), "{message}");
+        assert!(!message.contains("aes-key"), "{message}");
+        assert!(!message.contains("trying version"), "{message}");
+        // The Python API raises `OSError` for an error caused by an I/O error.
+        assert!(error.downcast_ref::<io::Error>().is_none());
+        assert!(!error.chain().any(|cause| cause.is::<io::Error>()));
+    }
+
+    #[test]
+    fn listing_an_invalid_pak_fails_on_one_line_naming_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        for contents in [GARBAGE, b"short", b""] {
+            let pak_path = tmp.path().join("garbage.pak");
+            fs::write(&pak_path, contents).unwrap();
+
+            assert_invalid_pak_error(&list(&pak_path).unwrap_err(), &pak_path);
+        }
+    }
+
+    #[test]
+    fn extracting_an_invalid_pak_fails_on_one_line_naming_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pak_path = tmp.path().join("garbage.pak");
+        fs::write(&pak_path, GARBAGE).unwrap();
+
+        let error = extract(&pak_path, None, &tmp.path().join("out")).unwrap_err();
+
+        assert_invalid_pak_error(&error, &pak_path);
+        assert!(!tmp.path().join("out").exists());
+    }
+
+    #[test]
+    fn a_missing_pak_stays_an_io_error() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let error = list(&tmp.path().join("missing.pak")).unwrap_err();
+
+        let io_error = error.downcast_ref::<io::Error>().unwrap();
+        assert_eq!(io_error.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn failure_detail_has_every_version_and_no_cli_advice() {
+        let error = Builder::new()
+            .reader(&mut Cursor::new(GARBAGE))
+            .err()
+            .unwrap();
+
+        let detail = failure_detail(&error);
+
+        let versions = detail.lines().filter(|l| !l.is_empty()).count();
+        assert!(versions > 1, "{detail}");
+        assert!(
+            detail
+                .lines()
+                .filter(|l| !l.is_empty())
+                .all(|l| l.starts_with("trying version ")),
+            "{detail}"
+        );
+        assert!(error.to_string().contains("--aes-key"), "{error}");
+        assert!(!detail.contains("aes-key"), "{detail}");
     }
 
     #[test]

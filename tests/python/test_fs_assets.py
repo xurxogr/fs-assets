@@ -102,6 +102,89 @@ def _icon_mod_pak(tmp_path):
     return pak
 
 
+def _garbage_pak(tmp_path, contents=b"\xde\xad\xbe\xef" * 1024):
+    pak = tmp_path / "garbage.pak"
+    pak.write_bytes(contents)
+    return pak
+
+
+INVALID_PAK_CALLS = {
+    "build_catalog": lambda tmp_path, pak: fs_assets.build_catalog(
+        pak=str(pak), output=str(tmp_path / "c.json")
+    ),
+    "pak_coverage": lambda tmp_path, pak: fs_assets.pak_coverage(
+        catalog=_catalog(tmp_path), pak=[pak]
+    ),
+    "add_mod": lambda tmp_path, pak: fs_assets.add_mod(
+        pak=str(pak), catalog=_catalog(tmp_path), db=str(tmp_path / "x.h5")
+    ),
+    "unpak": lambda tmp_path, pak: fs_assets.unpak(str(pak), str(tmp_path / "out")),
+}
+
+
+@pytest.mark.parametrize("call", INVALID_PAK_CALLS.values(), ids=INVALID_PAK_CALLS.keys())
+def test_invalid_pak_raises_a_one_line_runtime_error_naming_the_pak(tmp_path, call):
+    pak = _garbage_pak(tmp_path)
+
+    with pytest.raises(RuntimeError) as raised:
+        call(tmp_path, pak)
+
+    # Exactly RuntimeError: a subclass or an OSError would change what callers catch.
+    assert raised.type is RuntimeError
+    message = str(raised.value)
+    assert str(pak) in message
+    assert len(message.splitlines()) == 1
+    assert message == message.strip()
+    assert "aes-key" not in message
+    assert "trying version" not in message
+
+
+@pytest.mark.parametrize("contents", [b"", b"short"], ids=["empty", "shorter_than_a_footer"])
+def test_truncated_pak_is_still_a_runtime_error(tmp_path, contents):
+    pak = _garbage_pak(tmp_path, contents)
+
+    with pytest.raises(RuntimeError) as raised:
+        fs_assets.pak_coverage(catalog=_catalog(tmp_path), pak=[pak])
+
+    assert raised.type is RuntimeError
+    assert str(pak) in str(raised.value)
+    assert len(str(raised.value).splitlines()) == 1
+
+
+def test_invalid_pak_names_the_bad_one_of_several(tmp_path):
+    good = _icon_mod_pak(tmp_path)
+    bad = _garbage_pak(tmp_path)
+
+    with pytest.raises(RuntimeError) as raised:
+        fs_assets.pak_coverage(catalog=_catalog(tmp_path), pak=[good, bad])
+
+    assert str(bad) in str(raised.value)
+    assert str(good) not in str(raised.value)
+
+
+@pytest.mark.parametrize("call", INVALID_PAK_CALLS.values(), ids=INVALID_PAK_CALLS.keys())
+def test_invalid_pak_logs_each_version_failure_at_debug(tmp_path, caplog, call):
+    pak = _garbage_pak(tmp_path)
+
+    with caplog.at_level(logging.DEBUG, logger="fs_assets"), pytest.raises(RuntimeError):
+        call(tmp_path, pak)
+
+    details = [r for r in caplog.records if "trying version" in r.getMessage()]
+    assert len(details) > 1
+    assert all(r.name == "fs_assets" and r.levelno == logging.DEBUG for r in details)
+    assert all(str(pak) in r.getMessage() for r in details)
+    assert not any("aes-key" in r.getMessage() for r in caplog.records)
+
+
+def test_invalid_pak_logs_nothing_above_debug(tmp_path, caplog):
+    pak = _garbage_pak(tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="fs_assets"), pytest.raises(RuntimeError):
+        fs_assets.pak_coverage(catalog=_catalog(tmp_path), pak=[pak])
+
+    assert caplog.records == []
+
+
 def test_add_mod_requires_a_catalog():
     with pytest.raises(TypeError):
         fs_assets.add_mod(pak="War.pak")

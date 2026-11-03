@@ -54,8 +54,8 @@ fn parse_choice<T: clap::ValueEnum>(what: &str, value: &str) -> PyResult<T> {
     })
 }
 
-/// Hands the library's warnings to Python's `logging`, under the `fs_assets`
-/// logger, so callers can filter, capture or silence them.
+/// Hands the library's log records to Python's `logging`, under the
+/// `fs_assets` logger, so callers can filter, capture or silence them.
 struct PythonLogger;
 
 impl log::Log for PythonLogger {
@@ -823,9 +823,10 @@ fn _fs_assets(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_default_pak_directory, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(cli_main, m)?)?;
-    // Fails when the embedding process already installed a logger.
+    // Fails when the embedding process already installed a logger. Debug
+    // records pass too: the level of Python's logger decides what is kept.
     if log::set_logger(&PythonLogger).is_ok() {
-        log::set_max_level(log::LevelFilter::Warn);
+        log::set_max_level(log::LevelFilter::Debug);
     }
     Ok(())
 }

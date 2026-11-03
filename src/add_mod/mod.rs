@@ -324,6 +324,25 @@ mod tests {
     }
 
     #[test]
+    fn extracting_an_invalid_pak_fails_on_one_line_naming_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bad = tmp.path().join("bad.pak");
+        std::fs::write(&bad, [0xde; 4096]).unwrap();
+
+        let message = extract_paks(
+            std::slice::from_ref(&bad),
+            |_| true,
+            &tmp.path().join("out"),
+            &|_, _| Ok(()),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(message.contains(&bad.display().to_string()), "{message}");
+        assert_eq!(message.lines().count(), 1, "{message}");
+    }
+
+    #[test]
     fn several_mod_paks_contribute_their_icons_together() {
         let tmp = tempfile::tempdir().unwrap();
         let pistol_icon = "War/Content/Textures/UI/ItemIcons/T_Pistol";
