@@ -38,6 +38,9 @@ fs-assets build-catalog --pak War-WindowsNoEditor.pak -o catalog.json
 # Name per language of every stockpile and pinnable structure
 fs-assets build-display-names --pak War-WindowsNoEditor.pak -o display_names.json
 
+# Towns and area names of every hex, with their map coordinates
+fs-assets build-map-locations --pak War-WindowsNoEditor.pak -o map_locations.json
+
 # Icon-template database for the base game
 fs-assets add-mod --pak War-WindowsNoEditor.pak --catalog catalog.json --db templates.h5
 
@@ -62,6 +65,7 @@ fs-assets modify-icon --db templates.h5 --code RifleW --faction wardens \
 | `convert` | Convert one `.uasset` to JSON or PNG. |
 | `build-catalog` | Build the catalog from the game pak or an extracted directory. `--full` keeps audio, visual and engine-internal fields. |
 | `build-display-names` | Write the name per language of every stockpile and every structure that can be pinned on the map (`CodeName`, `DisplayName`, `DisplayNameLocales`, `Stockpile`, `Pinnable`), resolved by localization key. Fails, after writing the table, if a code given with `--require` (repeatable) isn't in it. |
+| `build-map-locations` | Write every hex's named locations, towns (`major: true`) and lesser area names, with their map coordinates from 0 to 1 (those of a save's `NormalizedMapCoords`, 6 decimals): `{"hexes": {"WestgateHex": [{"name": "Lord's Mouth", "major": true, "x": 0.829339, "y": 0.430749}]}}`. Hexes are named after their map file (`DeadlandsHex`; saves say `DeadLandsHex`, so compare without case). From the pak, only `War/Content/Maps/Master/*.umap` is extracted (~9 GB, to a temporary directory). A marker without a name or position is skipped with a warning; fails, writing nothing, if a hex has no town. |
 | `add-mod` | Add a mod's (or the base game's) icons to the template database. Re-adding a mod replaces its templates. `--pak` can be repeated (later paks win); `--resolution` rebuilds only some resolutions. |
 | `check-paks` | Report how many of the catalog's icons and overlays some paks contain, reading only the pak indexes. |
 | `extract-icons` | Write every catalog item's icon as `<CodeName>.png`, with its subtype icon drawn over it as in game; `--no-subicons` writes the bare icons. `--vanilla-pak` supplies the subtype icons a mod lacks. |
@@ -110,6 +114,9 @@ names = fs_assets.build_display_names(
     pak="War-WindowsNoEditor.pak", output="display_names.json", required=["Keep"]
 )
 assert not names["missing"]  # {required code: why it was left out}
+locations = fs_assets.build_map_locations(
+    pak="War-WindowsNoEditor.pak", output="map_locations.json"
+)  # {maps, locations, major, skipped}
 fs_assets.add_mod(
     pak=["IconMod_1.pak", "IconMod_2.pak"],
     vanilla_pak="War-WindowsNoEditor.pak",

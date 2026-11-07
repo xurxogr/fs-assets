@@ -1,5 +1,6 @@
 /target
 *.uasset
+*.umap
 *.png
 *.json
 *.so

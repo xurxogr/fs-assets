@@ -12,7 +12,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 
 use crate::add_mod::{AddModRequest, AssetSource, ExtractIconsRequest, Progress};
-use crate::{catalog, convert, database, grep, locres};
+use crate::{catalog, convert, database, grep, locres, map_locations};
 
 /// Raises `e` as the `OSError` subclass matching the I/O error that caused it
 /// (`FileNotFoundError` for a missing path, `PermissionError`, ...), or as a
@@ -377,6 +377,77 @@ fn build_display_names(
         "unnamed": stats.unnamed,
         "unknown_class": stats.unknown_class,
         "missing": stats.missing,
+    });
+    json_to_py(py, &stats_json)
+}
+
+/// Write every hex's named locations, its towns and the lesser names of its
+/// areas, to `output` as JSON: `{"hexes": {"<Hex>": [{"name", "major", "x",
+/// "y"}, ...]}}`. Hexes are named after their map file (`DeadlandsHex`, which
+/// saves spell `DeadLandsHex`, so compare them without regard to case); each
+/// hex's locations are sorted by name; `major` marks a town; `x` and `y` are
+/// the map coordinates from 0 to 1, the ones of a save's `NormalizedMapCoords`,
+/// written with 6 decimals.
+///
+/// Args:
+///     extract_dir: Root of an extracted pak (contains `War/Content/...`).
+///         Exactly one of `extract_dir` and `pak` is required.
+///     output: Path to write the JSON to.
+///     pak: The game's `.pak`, read directly: only the hex maps
+///         (`War/Content/Maps/Master/*.umap`) are extracted, into a temporary
+///         directory removed afterwards.
+///     progress: Optional callable `(stage, done, total)` called as the build
+///         advances: `stage` is `extracting_maps` (only with `pak`) or
+///         `building_map_locations`. If the callable raises, it isn't called
+///         again and its exception is re-raised once the build ends.
+///
+/// Returns:
+///     Dict with `maps` (hexes read), `locations` (written, towns included),
+///     `major` (the towns) and `skipped` (markers left out for want of a name
+///     or a position, each logged as a warning to the `fs_assets` logger).
+///
+/// Raises:
+///     RuntimeError: a map can't be read, or a hex has no town. Nothing is
+///         written then.
+#[pyfunction]
+#[pyo3(
+    signature = (
+        extract_dir=None, output=PathBuf::from("map_locations.json"), *, pak=None,
+        progress=None,
+    ),
+    text_signature = "(extract_dir=None, output='map_locations.json', *, pak=None, progress=None)"
+)]
+fn build_map_locations(
+    py: Python<'_>,
+    extract_dir: Option<PathBuf>,
+    output: PathBuf,
+    pak: Option<PathBuf>,
+    progress: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    let paks = pak.into_iter().collect();
+    let source = required_asset_source("extract_dir", extract_dir, "pak", paks)?;
+    let source = match &source {
+        AssetSource::ExtractDir(dir) => catalog::pipeline::CatalogSource::ExtractDir(dir),
+        // Built from the single `pak` argument, so it holds exactly one.
+        AssetSource::Pak(paks) => catalog::pipeline::CatalogSource::Pak(&paks[0]),
+    };
+    let progress = PyProgress::new(progress);
+    let result = py.detach(|| {
+        map_locations::build_map_locations_to_file(
+            source,
+            &output,
+            &|done, total| progress.report("extracting_maps", done, total),
+            &|done, total| progress.report("building_map_locations", done, total),
+        )
+    });
+    progress.finish()?;
+    let stats = result.map_err(to_py_err)?;
+
+    let stats_json = serde_json::json!({
+        "maps": stats.maps,
+        "locations": stats.locations,
+        "major": stats.major,
+        "skipped": stats.skipped,
     });
     json_to_py(py, &stats_json)
 }
@@ -889,6 +960,7 @@ fn _fs_assets(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(convert_to_png, m)?)?;
     m.add_function(wrap_pyfunction!(build_catalog, m)?)?;
     m.add_function(wrap_pyfunction!(build_display_names, m)?)?;
+    m.add_function(wrap_pyfunction!(build_map_locations, m)?)?;
     m.add_function(wrap_pyfunction!(add_mod, m)?)?;
     m.add_function(wrap_pyfunction!(modify_icon, m)?)?;
     m.add_function(wrap_pyfunction!(extract_icons, m)?)?;

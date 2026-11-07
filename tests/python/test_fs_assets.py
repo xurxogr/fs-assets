@@ -115,6 +115,9 @@ INVALID_PAK_CALLS = {
     "build_display_names": lambda tmp_path, pak: fs_assets.build_display_names(
         pak=str(pak), output=str(tmp_path / "n.json")
     ),
+    "build_map_locations": lambda tmp_path, pak: fs_assets.build_map_locations(
+        pak=str(pak), output=str(tmp_path / "l.json")
+    ),
     "pak_coverage": lambda tmp_path, pak: fs_assets.pak_coverage(
         catalog=_catalog(tmp_path), pak=[pak]
     ),
@@ -358,6 +361,44 @@ def test_build_display_names_requires_no_code_by_default(tmp_path):
     )
 
     assert stats["missing"] == {}
+
+
+def test_build_map_locations_requires_exactly_one_source():
+    with pytest.raises(ValueError):
+        fs_assets.build_map_locations()
+    with pytest.raises(ValueError):
+        fs_assets.build_map_locations("extracted", pak="War.pak")
+
+
+def test_build_map_locations_rejects_a_pak_without_maps(tmp_path):
+    output = tmp_path / "map_locations.json"
+
+    with pytest.raises(RuntimeError, match="has no maps"):
+        fs_assets.build_map_locations(pak=str(_catalog_inputs_pak(tmp_path)), output=str(output))
+
+    assert not output.exists()
+
+
+def test_build_map_locations_fails_on_an_unreadable_map_naming_its_hex(tmp_path):
+    content = tmp_path / "maps_content"
+    umap = content / "War/Content/Maps/Master/AcrithiaHex.umap"
+    umap.parent.mkdir(parents=True)
+    umap.write_bytes(b"not a map")
+    pak = tmp_path / "maps.pak"
+    native.pack(str(content), str(pak))
+    output = tmp_path / "map_locations.json"
+    reports = []
+
+    with pytest.raises(RuntimeError, match="reading the map of AcrithiaHex"):
+        fs_assets.build_map_locations(
+            pak=str(pak),
+            output=str(output),
+            progress=lambda stage, done, total: reports.append((stage, done, total)),
+        )
+
+    stages = list(dict.fromkeys(stage for stage, _, _ in reports))
+    assert stages == ["extracting_maps", "building_map_locations"]
+    assert not output.exists()
 
 
 def _png(path, width, height, rgba):

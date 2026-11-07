@@ -7,13 +7,16 @@ use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::add_mod::{self, AssetSource};
-use crate::{catalog, convert, database, grep, locres, pak};
+use crate::{catalog, convert, database, grep, locres, map_locations, pak};
 
 /// Default output path for `build-catalog`.
 const DEFAULT_CATALOG_OUTPUT: &str = "catalog.json";
 
 /// Default output path for `build-display-names`.
 const DEFAULT_DISPLAY_NAMES_OUTPUT: &str = "display_names.json";
+
+/// Default output path for `build-map-locations`.
+const DEFAULT_MAP_LOCATIONS_OUTPUT: &str = "map_locations.json";
 
 /// Default output path for `add-mod`'s database.
 const DEFAULT_DATABASE_OUTPUT: &str = "database.h5";
@@ -64,6 +67,21 @@ enum Commands {
         /// `CodeName` that must come out in the table. Can be repeated.
         #[arg(long = "require")]
         required: Vec<String>,
+    },
+    /// Write every hex's named locations (towns and lesser area names) with
+    /// their map coordinates, from an extracted `war/` directory or straight
+    /// from the game's `.pak`. Fails, writing nothing, if a hex has no town.
+    BuildMapLocations {
+        /// Directory the game's pak was already extracted into.
+        #[arg(long, required_unless_present = "pak", conflicts_with = "pak")]
+        extract_dir: Option<PathBuf>,
+        /// The game's `.pak`, read directly: only the hex maps
+        /// (`War/Content/Maps/Master/*.umap`) are extracted, into a temporary
+        /// directory removed afterwards.
+        #[arg(long)]
+        pak: Option<PathBuf>,
+        #[arg(short, long, default_value = DEFAULT_MAP_LOCATIONS_OUTPUT)]
+        output: PathBuf,
     },
     /// Build the item/vehicle/structure catalog from an extracted `war/`
     /// directory (expects `War/Content/{Blueprints,Blueprints/Data,
@@ -312,6 +330,7 @@ fn defers_interrupts(command: &Commands) -> bool {
         Commands::Unpak { .. }
             | Commands::BuildCatalog { .. }
             | Commands::BuildDisplayNames { .. }
+            | Commands::BuildMapLocations { .. }
             | Commands::AddMod { .. }
             | Commands::ExtractIcons { .. }
             | Commands::Pack { .. }
@@ -499,6 +518,27 @@ fn run_command(
             if !stats.missing.is_empty() {
                 anyhow::bail!("{} required code(s) not in the table", stats.missing.len());
             }
+        }
+        Commands::BuildMapLocations {
+            extract_dir,
+            pak,
+            output,
+        } => {
+            let source = match (&extract_dir, &pak) {
+                (Some(dir), _) => catalog::pipeline::CatalogSource::ExtractDir(dir),
+                (None, Some(pak)) => catalog::pipeline::CatalogSource::Pak(pak),
+                (None, None) => anyhow::bail!("either --extract-dir or --pak is required"),
+            };
+            let stats = map_locations::build_map_locations_to_file(
+                source,
+                &output,
+                &interruptible,
+                &interruptible,
+            )?;
+            println!(
+                "maps {} locations {} major {} skipped {}",
+                stats.maps, stats.locations, stats.major, stats.skipped
+            );
         }
         Commands::AddMod {
             extract_dir,
@@ -952,6 +992,50 @@ mod tests {
             "war"
         ])
         .is_err());
+    }
+
+    #[test]
+    fn build_map_locations_takes_exactly_one_source() {
+        let cli = parse(&["build-map-locations", "--pak", "War.pak"]).unwrap();
+        let Commands::BuildMapLocations {
+            extract_dir,
+            pak,
+            output,
+        } = cli.command
+        else {
+            panic!("expected build-map-locations");
+        };
+        assert_eq!(extract_dir, None);
+        assert_eq!(pak, Some("War.pak".into()));
+        assert_eq!(output, PathBuf::from(DEFAULT_MAP_LOCATIONS_OUTPUT));
+
+        let cli = parse(&[
+            "build-map-locations",
+            "--extract-dir",
+            "war",
+            "-o",
+            "l.json",
+        ])
+        .unwrap();
+        let Commands::BuildMapLocations { output, .. } = cli.command else {
+            panic!("expected build-map-locations");
+        };
+        assert_eq!(output, PathBuf::from("l.json"));
+
+        assert!(parse(&["build-map-locations"]).is_err());
+        assert!(parse(&[
+            "build-map-locations",
+            "--pak",
+            "War.pak",
+            "--extract-dir",
+            "war"
+        ])
+        .is_err());
+        assert!(defers_interrupts(
+            &parse(&["build-map-locations", "--pak", "War.pak"])
+                .unwrap()
+                .command
+        ));
     }
 
     #[test]

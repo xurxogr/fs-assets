@@ -13,6 +13,7 @@ from fs_assets.types import (
     ExtractIconsStats,
     Faction,
     LocresDumpStats,
+    MapLocationsStats,
     PakCoverage,
     PakVersion,
     ProgressCallback,
@@ -27,6 +28,7 @@ __all__ = [
     "convert_to_png",
     "build_catalog",
     "build_display_names",
+    "build_map_locations",
     "add_mod",
     "modify_icon",
     "extract_icons",
@@ -67,6 +69,13 @@ def build_display_names(
     required: Sequence[str] = (),
     progress: ProgressCallback | None = None,
 ) -> DisplayNamesStats: ...
+def build_map_locations(
+    extract_dir: StrPath | None = None,
+    output: StrPath = "map_locations.json",
+    *,
+    pak: StrPath | None = None,
+    progress: ProgressCallback | None = None,
+) -> MapLocationsStats: ...
 def add_mod(
     extract_dir: StrPath | None = None,
     *,

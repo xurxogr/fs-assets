@@ -186,7 +186,10 @@ fn catch_unwind_quietly<R>(f: impl FnOnce() -> R + UnwindSafe) -> std::thread::R
 /// as a defensive backstop against future crate bugs, but with the vendored
 /// patch applied (see Cargo.toml) this should no longer be hit for any real
 /// asset.
-fn parse_asset<C: Read + Seek + UnwindSafe>(reader: C, path: &Path) -> anyhow::Result<Asset<C>> {
+pub(crate) fn parse_asset<C: Read + Seek + UnwindSafe>(
+    reader: C,
+    path: &Path,
+) -> anyhow::Result<Asset<C>> {
     match catch_unwind_quietly(move || Asset::new(reader, None, ENGINE_VERSION)) {
         Ok(Ok(asset)) => Ok(asset),
         Ok(Err(e)) => Err(e.into()),

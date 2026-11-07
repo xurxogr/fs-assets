@@ -32,6 +32,13 @@ class DisplayNamesStats(TypedDict):
     missing: dict[str, str]
 
 
+class MapLocationsStats(TypedDict):
+    maps: int
+    locations: int
+    major: int
+    skipped: int
+
+
 class DatabaseBuildStats(TypedDict):
     total_items: int
     items_embedded: int

@@ -12,6 +12,7 @@ pub mod convert;
 pub mod database;
 pub mod grep;
 pub mod locres;
+pub mod map_locations;
 pub mod pak;
 
 // Python bindings (when compiled with --features python). Kept as one
