@@ -19,6 +19,7 @@ import sys
 from ._fs_assets import (
     add_mod,
     build_catalog,
+    build_display_names,
     cli_main,
     convert_to_json,
     convert_to_png,
@@ -39,6 +40,7 @@ from ._fs_assets import (
 __all__ = [
     "add_mod",
     "build_catalog",
+    "build_display_names",
     "cli_main",
     "convert_to_json",
     "convert_to_png",

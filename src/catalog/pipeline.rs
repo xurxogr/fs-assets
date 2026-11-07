@@ -83,7 +83,9 @@ pub fn collect_blueprint_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
 /// reported and treated as missing, like one that fails to parse, so
 /// [`Blueprints`] remembers it as such: otherwise the panic would skip that,
 /// and every blueprint with that ancestor would parse it, and panic, again.
-fn catching_loader(raw: impl Fn(&str) -> Option<Value>) -> impl Fn(&str) -> Option<Value> {
+pub(crate) fn catching_loader(
+    raw: impl Fn(&str) -> Option<Value>,
+) -> impl Fn(&str) -> Option<Value> {
     move |object_path: &str| {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| raw(object_path))).unwrap_or_else(
             |_| {
@@ -165,14 +167,13 @@ pub fn build_catalog_from_pak(pak: &Path) -> anyhow::Result<(Vec<Value>, Catalog
     build_catalog_from_pak_with_progress(pak, &|_, _| Ok(()), &|_, _| Ok(()))
 }
 
-/// Same as [`build_catalog_from_pak`], reporting `(done, total)` over the
-/// extracted files to `extracting` and over the blueprint files to
-/// `building` (see [`build_catalog_from_extract_dir_with_progress`]).
-pub fn build_catalog_from_pak_with_progress(
+/// Extracts `pak`'s catalog inputs ([`CATALOG_INPUT_PREFIXES`]) into a
+/// temporary directory, removed when the returned handle drops, reporting
+/// `(done, total)` over the extracted files to `extracting`.
+pub(crate) fn extract_catalog_inputs(
     pak: &Path,
     extracting: &dyn Fn(usize, usize) -> anyhow::Result<()>,
-    building: &dyn Fn(usize, usize) -> anyhow::Result<()>,
-) -> anyhow::Result<(Vec<Value>, CatalogStats)> {
+) -> anyhow::Result<tempfile::TempDir> {
     let workspace = tempfile::tempdir()?;
     // The game's catalog inputs add up to ~1.7 GB, the largest ~55 MB.
     let mut budget = crate::pak::ExtractBudget {
@@ -193,17 +194,21 @@ pub fn build_catalog_from_pak_with_progress(
             CATALOG_INPUT_PREFIXES.join(" or ")
         );
     }
-    build_catalog_from_extract_dir_with_progress(workspace.path(), building)
+    Ok(workspace)
 }
 
-/// Same as [`build_catalog_from_extract_dir`], reporting `(done, total)`
-/// over the blueprint files to `progress`: once before the first file and
-/// once after the last. An error `progress` returns stops the build and is
-/// returned.
-pub fn build_catalog_from_extract_dir_with_progress(
-    extract_dir: &Path,
-    progress: &dyn Fn(usize, usize) -> anyhow::Result<()>,
-) -> anyhow::Result<(Vec<Value>, CatalogStats)> {
+/// The directories of an extraction the catalog inputs are read from.
+pub(crate) struct ContentDirs {
+    pub blueprints: PathBuf,
+    pub data: PathBuf,
+    pub localization: PathBuf,
+    /// [`SEARCH_DIRECTORIES`] under `blueprints`.
+    pub search: Vec<PathBuf>,
+}
+
+/// The [`ContentDirs`] of `extract_dir`, failing on one that is missing, not
+/// a directory, or reached through a symlink.
+pub(crate) fn content_dirs(extract_dir: &Path) -> anyhow::Result<ContentDirs> {
     if !extract_dir.exists() {
         anyhow::bail!("extraction directory not found: {}", extract_dir.display());
     }
@@ -245,6 +250,41 @@ pub fn build_catalog_from_extract_dir_with_progress(
             anyhow::bail!("{} is reached through a symlink", path.display());
         }
     }
+
+    Ok(ContentDirs {
+        blueprints: blueprints_dir,
+        data: data_dir,
+        localization: localization_dir,
+        search: search_dirs,
+    })
+}
+
+/// Same as [`build_catalog_from_pak`], reporting `(done, total)` over the
+/// extracted files to `extracting` and over the blueprint files to
+/// `building` (see [`build_catalog_from_extract_dir_with_progress`]).
+pub fn build_catalog_from_pak_with_progress(
+    pak: &Path,
+    extracting: &dyn Fn(usize, usize) -> anyhow::Result<()>,
+    building: &dyn Fn(usize, usize) -> anyhow::Result<()>,
+) -> anyhow::Result<(Vec<Value>, CatalogStats)> {
+    let workspace = extract_catalog_inputs(pak, extracting)?;
+    build_catalog_from_extract_dir_with_progress(workspace.path(), building)
+}
+
+/// Same as [`build_catalog_from_extract_dir`], reporting `(done, total)`
+/// over the blueprint files to `progress`: once before the first file and
+/// once after the last. An error `progress` returns stops the build and is
+/// returned.
+pub fn build_catalog_from_extract_dir_with_progress(
+    extract_dir: &Path,
+    progress: &dyn Fn(usize, usize) -> anyhow::Result<()>,
+) -> anyhow::Result<(Vec<Value>, CatalogStats)> {
+    let ContentDirs {
+        blueprints: blueprints_dir,
+        data: data_dir,
+        localization: localization_dir,
+        search: search_dirs,
+    } = content_dirs(extract_dir)?;
 
     let loc_service = LocalizationLookup::new(&localization_dir, None);
 

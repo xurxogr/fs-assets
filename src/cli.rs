@@ -12,6 +12,9 @@ use crate::{catalog, convert, database, grep, locres, pak};
 /// Default output path for `build-catalog`.
 const DEFAULT_CATALOG_OUTPUT: &str = "catalog.json";
 
+/// Default output path for `build-display-names`.
+const DEFAULT_DISPLAY_NAMES_OUTPUT: &str = "display_names.json";
+
 /// Default output path for `add-mod`'s database.
 const DEFAULT_DATABASE_OUTPUT: &str = "database.h5";
 
@@ -43,6 +46,24 @@ enum Commands {
         to: ConvertFormat,
         #[arg(short, long)]
         output: PathBuf,
+    },
+    /// Build the table of every structure's and vehicle's name per language,
+    /// from an extracted `war/` directory or straight from the game's `.pak`.
+    /// Exits with an error, once the table is written, if a `--require`d code
+    /// isn't in it.
+    BuildDisplayNames {
+        /// Directory the game's pak was already extracted into.
+        #[arg(long, required_unless_present = "pak", conflicts_with = "pak")]
+        extract_dir: Option<PathBuf>,
+        /// The game's `.pak`, read directly: only the catalog inputs are
+        /// extracted, into a temporary directory removed afterwards.
+        #[arg(long)]
+        pak: Option<PathBuf>,
+        #[arg(short, long, default_value = DEFAULT_DISPLAY_NAMES_OUTPUT)]
+        output: PathBuf,
+        /// `CodeName` that must come out in the table. Can be repeated.
+        #[arg(long = "require")]
+        required: Vec<String>,
     },
     /// Build the item/vehicle/structure catalog from an extracted `war/`
     /// directory (expects `War/Content/{Blueprints,Blueprints/Data,
@@ -290,6 +311,7 @@ fn defers_interrupts(command: &Commands) -> bool {
         command,
         Commands::Unpak { .. }
             | Commands::BuildCatalog { .. }
+            | Commands::BuildDisplayNames { .. }
             | Commands::AddMod { .. }
             | Commands::ExtractIcons { .. }
             | Commands::Pack { .. }
@@ -444,6 +466,39 @@ fn run_command(
                 "parsed {} stockpilable {} errors {} total_files {}",
                 stats.parsed, stats.stockpilable, stats.errors, stats.total_files
             );
+        }
+        Commands::BuildDisplayNames {
+            extract_dir,
+            pak,
+            output,
+            required,
+        } => {
+            let source = match (&extract_dir, &pak) {
+                (Some(dir), _) => catalog::pipeline::CatalogSource::ExtractDir(dir),
+                (None, Some(pak)) => catalog::pipeline::CatalogSource::Pak(pak),
+                (None, None) => anyhow::bail!("either --extract-dir or --pak is required"),
+            };
+            let stats = catalog::display_names::build_display_names_to_file(
+                source,
+                &output,
+                &required,
+                &interruptible,
+                &interruptible,
+            )?;
+            println!(
+                "resolved {} stockpiles {} pinnable {} unnamed {} unknown_class {} missing {} errors {} total_files {}",
+                stats.resolved,
+                stats.stockpiles,
+                stats.pinnable,
+                stats.unnamed.len(),
+                stats.unknown_class.len(),
+                stats.missing.len(),
+                stats.errors,
+                stats.total_files
+            );
+            if !stats.missing.is_empty() {
+                anyhow::bail!("{} required code(s) not in the table", stats.missing.len());
+            }
         }
         Commands::AddMod {
             extract_dir,
@@ -861,6 +916,42 @@ mod tests {
             .unwrap(),
             Some(AssetSource::Pak(vec!["War.pak".into()]))
         );
+    }
+
+    #[test]
+    fn build_display_names_takes_one_source_and_repeated_required_codes() {
+        let cli = parse(&[
+            "build-display-names",
+            "--pak",
+            "War.pak",
+            "--require",
+            "Keep",
+            "--require",
+            "Seaport",
+        ])
+        .unwrap();
+        let Commands::BuildDisplayNames {
+            pak,
+            output,
+            required,
+            ..
+        } = cli.command
+        else {
+            panic!("expected build-display-names");
+        };
+        assert_eq!(pak, Some("War.pak".into()));
+        assert_eq!(output, PathBuf::from(DEFAULT_DISPLAY_NAMES_OUTPUT));
+        assert_eq!(required, ["Keep", "Seaport"]);
+
+        assert!(parse(&["build-display-names"]).is_err());
+        assert!(parse(&[
+            "build-display-names",
+            "--pak",
+            "War.pak",
+            "--extract-dir",
+            "war"
+        ])
+        .is_err());
     }
 
     #[test]

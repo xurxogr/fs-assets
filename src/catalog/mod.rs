@@ -12,6 +12,7 @@ pub mod catalog_assembler;
 pub mod catalog_field_filter;
 pub mod damage_type_resolver;
 pub mod data_table_lookup;
+pub mod display_names;
 pub mod import_resolution;
 pub mod localization;
 pub mod pipeline;

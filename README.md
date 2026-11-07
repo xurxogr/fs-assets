@@ -35,6 +35,9 @@ The game pak is usually at
 # Item catalog straight from the game pak
 fs-assets build-catalog --pak War-WindowsNoEditor.pak -o catalog.json
 
+# Name per language of every stockpile and pinnable structure
+fs-assets build-display-names --pak War-WindowsNoEditor.pak -o display_names.json
+
 # Icon-template database for the base game
 fs-assets add-mod --pak War-WindowsNoEditor.pak --catalog catalog.json --db templates.h5
 
@@ -58,6 +61,7 @@ fs-assets modify-icon --db templates.h5 --code RifleW --faction wardens \
 | `unpak` | Extract files from a `.pak` (optionally only paths containing `--include`). |
 | `convert` | Convert one `.uasset` to JSON or PNG. |
 | `build-catalog` | Build the catalog from the game pak or an extracted directory. `--full` keeps audio, visual and engine-internal fields. |
+| `build-display-names` | Write the name per language of every stockpile and every structure that can be pinned on the map (`CodeName`, `DisplayName`, `DisplayNameLocales`, `Stockpile`, `Pinnable`), resolved by localization key. Fails, after writing the table, if a code given with `--require` (repeatable) isn't in it. |
 | `add-mod` | Add a mod's (or the base game's) icons to the template database. Re-adding a mod replaces its templates. `--pak` can be repeated (later paks win); `--resolution` rebuilds only some resolutions. |
 | `check-paks` | Report how many of the catalog's icons and overlays some paks contain, reading only the pak indexes. |
 | `extract-icons` | Write every catalog item's icon as `<CodeName>.png`, with its subtype icon drawn over it as in game; `--no-subicons` writes the bare icons. `--vanilla-pak` supplies the subtype icons a mod lacks. |
@@ -102,6 +106,10 @@ translate. Hashes are carried over unchanged.
 import fs_assets
 
 stats = fs_assets.build_catalog(pak="War-WindowsNoEditor.pak", output="catalog.json")
+names = fs_assets.build_display_names(
+    pak="War-WindowsNoEditor.pak", output="display_names.json", required=["Keep"]
+)
+assert not names["missing"]  # {required code: why it was left out}
 fs_assets.add_mod(
     pak=["IconMod_1.pak", "IconMod_2.pak"],
     vanilla_pak="War-WindowsNoEditor.pak",

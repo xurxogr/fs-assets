@@ -112,6 +112,9 @@ INVALID_PAK_CALLS = {
     "build_catalog": lambda tmp_path, pak: fs_assets.build_catalog(
         pak=str(pak), output=str(tmp_path / "c.json")
     ),
+    "build_display_names": lambda tmp_path, pak: fs_assets.build_display_names(
+        pak=str(pak), output=str(tmp_path / "n.json")
+    ),
     "pak_coverage": lambda tmp_path, pak: fs_assets.pak_coverage(
         catalog=_catalog(tmp_path), pak=[pak]
     ),
@@ -306,6 +309,55 @@ def test_build_catalog_from_a_pak_reports_progress_per_stage(tmp_path):
     assert reports[-1] == ("building_catalog", 0, 0)
     assert stats["total_files"] == 0
     assert json.loads(output.read_text()) == []
+
+
+def test_build_display_names_requires_a_source():
+    with pytest.raises(ValueError):
+        fs_assets.build_display_names()
+
+
+def test_build_display_names_rejects_both_extract_dir_and_pak():
+    with pytest.raises(ValueError):
+        fs_assets.build_display_names("extracted", pak="War.pak")
+
+
+def test_build_display_names_reports_every_required_code_left_out(tmp_path, caplog):
+    output = tmp_path / "display_names.json"
+    reports = []
+
+    with caplog.at_level(logging.WARNING, logger="fs_assets"):
+        stats = fs_assets.build_display_names(
+            pak=str(_catalog_inputs_pak(tmp_path)),
+            output=str(output),
+            required=["Keep", "Seaport"],
+            progress=lambda stage, done, total: reports.append((stage, done, total)),
+        )
+
+    stages = list(dict.fromkeys(stage for stage, _, _ in reports))
+    assert stages == ["extracting_catalog_inputs", "building_display_names"]
+    assert stats == {
+        "total_files": 0,
+        "errors": 0,
+        "resolved": 0,
+        "stockpiles": 0,
+        "pinnable": 0,
+        "unnamed": {},
+        "unknown_class": [],
+        "missing": {
+            "Keep": "no blueprint has this CodeName",
+            "Seaport": "no blueprint has this CodeName",
+        },
+    }
+    assert json.loads(output.read_text()) == []
+    assert "Keep left out" in caplog.text
+
+
+def test_build_display_names_requires_no_code_by_default(tmp_path):
+    stats = fs_assets.build_display_names(
+        pak=str(_catalog_inputs_pak(tmp_path)), output=str(tmp_path / "n.json")
+    )
+
+    assert stats["missing"] == {}
 
 
 def _png(path, width, height, rgba):

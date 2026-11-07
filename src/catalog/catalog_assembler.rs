@@ -620,7 +620,10 @@ pub fn assemble_catalog_entry(
 /// Moves each localizable text field's GUID to a `{field}Key` field,
 /// leaving its text in the field: from a `{Text, Guid}` dict, or looked up
 /// for a bare GUID string.
-fn extract_localization_keys(data: &mut Map<String, Value>, loc_service: &LocalizationLookup) {
+pub(crate) fn extract_localization_keys(
+    data: &mut Map<String, Value>,
+    loc_service: &LocalizationLookup,
+) {
     for field in LOCALIZABLE_FIELDS {
         let Some(value) = data.get(*field).cloned() else {
             continue;

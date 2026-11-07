@@ -9,6 +9,7 @@ from fs_assets.types import (
     Category,
     DatabaseBuildStats,
     DatabaseStatistics,
+    DisplayNamesStats,
     ExtractIconsStats,
     Faction,
     LocresDumpStats,
@@ -25,6 +26,7 @@ __all__ = [
     "convert_to_json",
     "convert_to_png",
     "build_catalog",
+    "build_display_names",
     "add_mod",
     "modify_icon",
     "extract_icons",
@@ -57,6 +59,14 @@ def build_catalog(
     pak: StrPath | None = None,
     progress: ProgressCallback | None = None,
 ) -> CatalogStats: ...
+def build_display_names(
+    extract_dir: StrPath | None = None,
+    output: StrPath = "display_names.json",
+    *,
+    pak: StrPath | None = None,
+    required: Sequence[str] = (),
+    progress: ProgressCallback | None = None,
+) -> DisplayNamesStats: ...
 def add_mod(
     extract_dir: StrPath | None = None,
     *,

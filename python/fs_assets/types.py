@@ -21,6 +21,17 @@ class CatalogStats(TypedDict):
     errors: int
 
 
+class DisplayNamesStats(TypedDict):
+    total_files: int
+    errors: int
+    resolved: int
+    stockpiles: int
+    pinnable: int
+    unnamed: dict[str, str]
+    unknown_class: list[str]
+    missing: dict[str, str]
+
+
 class DatabaseBuildStats(TypedDict):
     total_items: int
     items_embedded: int

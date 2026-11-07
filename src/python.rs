@@ -303,6 +303,84 @@ fn build_catalog(
     json_to_py(py, &stats_json)
 }
 
+/// Build the table of the name per language of every stockpile (structure or
+/// vehicle) and every structure that can be pinned on the map, and write it to
+/// `output` as JSON: a list of `{CodeName, DisplayName, DisplayNameLocales,
+/// Stockpile, Pinnable}` sorted by `CodeName`. Names are resolved through the
+/// localization key of the `DisplayName` of the blueprint with that
+/// `CodeName`, and a language without a translation is left out of
+/// `DisplayNameLocales`.
+///
+/// Args:
+///     extract_dir: Root of an extracted pak (contains `War/Content/...`).
+///         Exactly one of `extract_dir` and `pak` is required.
+///     output: Path to write the table JSON to.
+///     pak: The game's `.pak`, read directly: only the catalog inputs are
+///         extracted, into a temporary directory removed afterwards.
+///     required: `CodeName`s that must come out in the table. The table holds
+///         every stockpile and pinnable code either way.
+///     progress: Optional callable `(stage, done, total)` called as the build
+///         advances: `stage` is `extracting_catalog_inputs` (only with `pak`)
+///         or `building_display_names`. If the callable raises, it isn't
+///         called again and its exception is re-raised once the build ends.
+///
+/// Returns:
+///     Dict with `total_files`, `errors` (files that failed to parse),
+///     `resolved`, `stockpiles` and `pinnable` (codes in the table that are
+///     each), `unnamed` (each stockpile or pinnable code without a usable name,
+///     with why), `unknown_class` (blueprints with a map icon whose native class
+///     wasn't found, so whether they can be pinned is unknown) and `missing` (each `required` code out of the table, with why). Missing
+///     codes don't raise, so check `missing`; they are also logged as warnings
+///     to the `fs_assets` logger.
+#[pyfunction]
+#[pyo3(
+    signature = (
+        extract_dir=None, output=PathBuf::from("display_names.json"), *, pak=None,
+        required=Vec::new(), progress=None,
+    ),
+    text_signature = "(extract_dir=None, output='display_names.json', *, pak=None, required=(), progress=None)"
+)]
+fn build_display_names(
+    py: Python<'_>,
+    extract_dir: Option<PathBuf>,
+    output: PathBuf,
+    pak: Option<PathBuf>,
+    required: Vec<String>,
+    progress: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    let paks = pak.into_iter().collect();
+    let source = required_asset_source("extract_dir", extract_dir, "pak", paks)?;
+    let source = match &source {
+        AssetSource::ExtractDir(dir) => catalog::pipeline::CatalogSource::ExtractDir(dir),
+        // Built from the single `pak` argument, so it holds exactly one.
+        AssetSource::Pak(paks) => catalog::pipeline::CatalogSource::Pak(&paks[0]),
+    };
+    let progress = PyProgress::new(progress);
+    let result = py.detach(|| {
+        catalog::display_names::build_display_names_to_file(
+            source,
+            &output,
+            &required,
+            &|done, total| progress.report("extracting_catalog_inputs", done, total),
+            &|done, total| progress.report("building_display_names", done, total),
+        )
+    });
+    progress.finish()?;
+    let stats = result.map_err(to_py_err)?;
+
+    let stats_json = serde_json::json!({
+        "total_files": stats.total_files,
+        "errors": stats.errors,
+        "resolved": stats.resolved,
+        "stockpiles": stats.stockpiles,
+        "pinnable": stats.pinnable,
+        "unnamed": stats.unnamed,
+        "unknown_class": stats.unknown_class,
+        "missing": stats.missing,
+    });
+    json_to_py(py, &stats_json)
+}
+
 /// Add one mod's (or the base game's) icons to an icon-template HDF5
 /// database, creating it if it doesn't exist yet. The icons imported are the
 /// ones the existing `catalog` (see `build_catalog`) references, recorded
@@ -810,6 +888,7 @@ fn _fs_assets(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(convert_to_json, m)?)?;
     m.add_function(wrap_pyfunction!(convert_to_png, m)?)?;
     m.add_function(wrap_pyfunction!(build_catalog, m)?)?;
+    m.add_function(wrap_pyfunction!(build_display_names, m)?)?;
     m.add_function(wrap_pyfunction!(add_mod, m)?)?;
     m.add_function(wrap_pyfunction!(modify_icon, m)?)?;
     m.add_function(wrap_pyfunction!(extract_icons, m)?)?;
